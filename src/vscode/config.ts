@@ -3,7 +3,9 @@ import * as vscode from 'vscode';
 import { Config, Options } from '@/types/Config';
 import type { Logger } from '@/types/Logger';
 import type { Model } from '@/types/Model';
+import { normalizeReviewMode } from '@/types/ReviewMode';
 import { createGit } from '@/utils/git';
+import { resolveRepositoryRoot } from '@/utils/repository';
 import { LgtmLogger } from './logger';
 import { getChatModel } from './model';
 
@@ -11,8 +13,10 @@ import { getChatModel } from './model';
 declare const __GIT_VERSION__: string | undefined;
 
 const defaultModelId = 'gpt-4o';
+const configurationScope = 'codeReview';
 
 let config: Config | undefined;
+let configChangeSubscription: vscode.Disposable | undefined;
 
 /** Return config */
 export async function getConfig(): Promise<Config> {
@@ -23,9 +27,10 @@ export async function getConfig(): Promise<Config> {
 }
 
 async function initializeConfig(): Promise<Config> {
-    const logger = new LgtmLogger(getOptions().enableDebugOutput);
+    const options = getOptions();
+    const logger = new LgtmLogger(options.enableDebugOutput);
     if (__GIT_VERSION__) {
-        logger.info(`**LGTM dev build**: ${__GIT_VERSION__}`);
+        logger.info(`**codeReview dev build**: ${__GIT_VERSION__}`);
     }
 
     let mainWorkspace = vscode.workspace.workspaceFolders?.[0];
@@ -41,18 +46,22 @@ async function initializeConfig(): Promise<Config> {
     }
 
     const workspaceRoot = mainWorkspace.uri.fsPath;
+    const repositoryRoot = resolveRepositoryRoot(
+        workspaceRoot,
+        options.repositoryPath
+    );
     let git;
     try {
-        git = await createGit(workspaceRoot);
+        git = await createGit(repositoryRoot);
     } catch (error) {
         const message =
             error instanceof Error ? '\n\n```\n' + error.message + '\n```' : '';
         throw new Error(
-            'Error opening Git repository. Please open a folder containing a Git repository using `File -> Open Folder` and make sure Git is installed.' +
+            `Error opening Git repository at "${repositoryRoot}". Please set "codeReview.repositoryPath" to a valid Git repository path (absolute or workspace-relative) and make sure Git is installed.` +
                 message
         );
     }
-    const config = {
+    const initializedConfig = {
         git,
         workspaceRoot,
         gitRoot: git.getGitRoot(),
@@ -61,15 +70,30 @@ async function initializeConfig(): Promise<Config> {
         logger,
     };
 
-    vscode.workspace.onDidChangeConfiguration((ev) => {
-        if (!ev.affectsConfiguration('lgtm')) {
-            return;
-        }
-        config.logger.debug('Updating config...');
-        config.logger.setEnableDebug(getOptions().enableDebugOutput);
-    });
+    configChangeSubscription?.dispose();
+    configChangeSubscription = vscode.workspace.onDidChangeConfiguration(
+        (ev) => {
+            if (!ev.affectsConfiguration(configurationScope)) {
+                return;
+            }
+            if (
+                ev.affectsConfiguration(`${configurationScope}.repositoryPath`)
+            ) {
+                initializedConfig.logger.debug(
+                    'Repository path changed, reinitializing config...'
+                );
+                config = undefined;
+                return;
+            }
 
-    return config;
+            initializedConfig.logger.debug('Updating config...');
+            initializedConfig.logger.setEnableDebug(
+                getOptions().enableDebugOutput
+            );
+        }
+    );
+
+    return initializedConfig;
 }
 
 /** get desired chat model.
@@ -102,7 +126,7 @@ async function loadModel(modelId: string, logger: Logger): Promise<Model> {
 
         if (option === resetToDefaultOption) {
             await vscode.workspace
-                .getConfiguration('lgtm')
+                .getConfiguration(configurationScope)
                 .update(
                     'chatModel',
                     defaultModelId,
@@ -111,12 +135,12 @@ async function loadModel(modelId: string, logger: Logger): Promise<Model> {
             logger.info(`Chat model reset to default: ${defaultModelId}`);
             return await loadModel(defaultModelId, logger);
         } else if (option === selectChatModelOption) {
-            await vscode.commands.executeCommand('lgtm.selectChatModel');
+            await vscode.commands.executeCommand('codeReview.selectChatModel');
             return await loadModel(getOptions().chatModel, logger);
         }
 
         throw new Error(
-            `Couldn't find chat model. Please ensure the lgtm.chatModel setting is set to an available model ID. You can use the 'LGTM: Select Chat Model' command to pick one.`
+            `Couldn't find chat model. Please ensure the codeReview.chatModel setting is set to an available model ID. You can use the "codeReview: Select Chat Model" command to pick one.`
         );
     }
 }
@@ -127,12 +151,46 @@ export function toUri(config: Config, file: string): vscode.Uri {
 }
 
 function getOptions(): Options {
-    const config = vscode.workspace.getConfiguration('lgtm');
+    const config = vscode.workspace.getConfiguration(configurationScope);
 
     const minSeverity = config.get<number>('minSeverity', 1);
     const customPrompt = config.get<string>('customPrompt', '');
     const excludeGlobs = config.get<string[]>('exclude', []);
+    const repositoryPath = config.get<string>('repositoryPath', '');
+    const reviewMode = normalizeReviewMode(
+        config.get<string>('reviewMode', 'general')
+    );
+    const styleguide = config.get<string>('styleguide', '');
+    const styleguideUseCopilotInstructions = config.get<boolean>(
+        'styleguideUseCopilotInstructions',
+        true
+    );
+    const useGithubInstructions = config.get<boolean>(
+        'useGithubInstructions',
+        true
+    );
+    let architecturalContextLines = config.get<number>(
+        'architecturalContextLines',
+        30
+    );
+    if (architecturalContextLines < 3) {
+        architecturalContextLines = 3;
+    } else if (architecturalContextLines > 200) {
+        architecturalContextLines = 200;
+    }
     const enableDebugOutput = config.get<boolean>('enableDebugOutput', false);
+    const incrementalReReview = config.get<boolean>(
+        'incrementalReReview',
+        true
+    );
+    const hideTriagedFindings = config.get<boolean>(
+        'hideTriagedFindings',
+        false
+    );
+    const baselineFilePath = config.get<string>(
+        'baselineFilePath',
+        '.codereview-baseline.json'
+    );
     const chatModel = config.get<string>('chatModel', defaultModelId);
     const mergeFileReviewRequests = config.get<boolean>(
         'mergeFileReviewRequests',
@@ -155,6 +213,15 @@ function getOptions(): Options {
         minSeverity,
         customPrompt,
         excludeGlobs,
+        repositoryPath,
+        reviewMode,
+        styleguide,
+        styleguideUseCopilotInstructions,
+        useGithubInstructions,
+        architecturalContextLines,
+        incrementalReReview,
+        hideTriagedFindings,
+        baselineFilePath,
         enableDebugOutput,
         chatModel,
         mergeFileReviewRequests,

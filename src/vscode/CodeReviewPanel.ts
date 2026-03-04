@@ -1,14 +1,32 @@
 import { reviewDiff } from '@/review/review';
+import { updateFindingTriageStatus } from '@/review/baseline';
 import { Config } from '@/types/Config';
 import { FileComments } from '@/types/FileComments';
 import { ProposedAdjustment, ReviewComment } from '@/types/ReviewComment';
 import { ReviewRequest, ReviewScope } from '@/types/ReviewRequest';
 import { ReviewResult } from '@/types/ReviewResult';
+import { normalizeReviewMode, type ReviewMode } from '@/types/ReviewMode';
+import { isTriageStatus } from '@/types/TriageStatus';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { getConfig } from './config';
+import { pickCommit, pickRefs } from './ui';
 
 type WebviewMessage =
+    | { type: 'getReviewSettings' }
+    | { type: 'selectChatModel' }
+    | { type: 'selectReviewMode' }
+    | { type: 'selectRepository' }
+    | { type: 'startQuickReview' }
+    | { type: 'setIncrementalReReview'; enabled: boolean }
+    | { type: 'setHideTriagedFindings'; enabled: boolean }
+    | { type: 'quickReview'; reviewKind: 'review' | 'branch' | 'commit' }
+    | {
+          type: 'setFindingTriageStatus';
+          scopeKey: string;
+          findingId: string;
+          status: string;
+      }
     | { type: 'getBranches' }
     | { type: 'selectBaseBranch' }
     | { type: 'selectTargetBranch' }
@@ -47,11 +65,14 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
     private _config?: Config;
     private _commentController?: vscode.CommentController;
+    private _currentScopeKey?: string;
+    private _pendingQuickReviewScope?: ReviewScope;
     private _allComments: Array<{
         filePath: string;
         line: number;
         comment: string;
         proposedAdjustment?: ProposedAdjustment;
+        findingId?: string;
     }> = [];
     private _currentCommentIndex: number = -1;
     private _commentThreads: vscode.CommentThread[] = [];
@@ -86,6 +107,37 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
             async (data: WebviewMessage) => {
                 console.log('Received message from webview:', data);
                 switch (data.type) {
+                    case 'getReviewSettings':
+                        await this._getReviewSettings();
+                        break;
+                    case 'selectChatModel':
+                        await this._selectChatModel();
+                        break;
+                    case 'selectReviewMode':
+                        await this._selectReviewMode();
+                        break;
+                    case 'selectRepository':
+                        await this._selectRepository();
+                        break;
+                    case 'startQuickReview':
+                        await this._startQuickReview();
+                        break;
+                    case 'setIncrementalReReview':
+                        await this._setIncrementalReReview(data.enabled);
+                        break;
+                    case 'setHideTriagedFindings':
+                        await this._setHideTriagedFindings(data.enabled);
+                        break;
+                    case 'quickReview':
+                        await this._quickReview(data.reviewKind);
+                        break;
+                    case 'setFindingTriageStatus':
+                        await this._setFindingTriageStatus(
+                            data.scopeKey,
+                            data.findingId,
+                            data.status
+                        );
+                        break;
                     case 'getBranches':
                         await this._getBranches();
                         break;
@@ -143,22 +195,265 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
         );
     }
 
-    private async _getBranches() {
-        if (!this._config) {
-            this._config = await getConfig();
+    private async _ensureConfig(): Promise<Config> {
+        this._config = await getConfig();
+        return this._config;
+    }
+
+    private _toReviewModeLabel(mode: ReviewMode): string {
+        if (mode === 'architectural') {
+            return 'Architectural';
+        }
+        if (mode === 'styleguide') {
+            return 'Styleguide';
+        }
+        if (mode === 'performance') {
+            return 'Performance';
+        }
+        return 'General';
+    }
+
+    private async _getReviewSettings() {
+        const config = await this._ensureConfig();
+        const options = config.getOptions();
+        const reviewMode = normalizeReviewMode(options.reviewMode);
+        const chatModel = options.chatModel;
+        const chatModelLabel = chatModel;
+        const relativeGitRoot = path.relative(
+            config.workspaceRoot,
+            config.gitRoot
+        );
+        const isWorkspaceRelativeRoot =
+            relativeGitRoot.length > 0 &&
+            !relativeGitRoot.startsWith('..') &&
+            !path.isAbsolute(relativeGitRoot);
+        const repositoryPath =
+            relativeGitRoot.length === 0
+                ? '(workspace root)'
+                : isWorkspaceRelativeRoot
+                  ? relativeGitRoot
+                  : config.gitRoot;
+
+        this._view?.webview.postMessage({
+            type: 'reviewSettingsLoaded',
+            reviewMode,
+            reviewModeLabel: this._toReviewModeLabel(reviewMode),
+            chatModel,
+            chatModelLabel,
+            repositoryPath,
+            incrementalReReview: options.incrementalReReview ?? true,
+            hideTriagedFindings: options.hideTriagedFindings ?? false,
+        });
+    }
+
+    private async _selectChatModel() {
+        try {
+            await vscode.commands.executeCommand('codeReview.selectChatModel');
+            await this._getReviewSettings();
+        } catch (error) {
+            console.error('Error selecting chat model:', error);
+            this._view?.webview.postMessage({
+                type: 'error',
+                message: 'Failed to update chat model',
+            });
+        }
+    }
+
+    private async _selectReviewMode() {
+        try {
+            await vscode.commands.executeCommand('codeReview.selectReviewMode');
+            await this._getReviewSettings();
+        } catch (error) {
+            console.error('Error selecting review mode:', error);
+            this._view?.webview.postMessage({
+                type: 'error',
+                message: 'Failed to update review mode',
+            });
+        }
+    }
+
+    private async _selectRepository() {
+        try {
+            await vscode.commands.executeCommand('codeReview.selectRepository');
+            this._pendingQuickReviewScope = undefined;
+            this._view?.webview.postMessage({
+                type: 'quickReviewCleared',
+            });
+            this._config = undefined;
+            await this._getReviewSettings();
+            await this._getBranches();
+        } catch (error) {
+            console.error('Error selecting repository:', error);
+            this._view?.webview.postMessage({
+                type: 'error',
+                message: 'Failed to update repository',
+            });
+        }
+    }
+
+    private async _setIncrementalReReview(enabled: boolean) {
+        await vscode.workspace
+            .getConfiguration('codeReview')
+            .update(
+                'incrementalReReview',
+                enabled,
+                vscode.ConfigurationTarget.Workspace
+            );
+        await this._getReviewSettings();
+    }
+
+    private async _setHideTriagedFindings(enabled: boolean) {
+        await vscode.workspace
+            .getConfiguration('codeReview')
+            .update(
+                'hideTriagedFindings',
+                enabled,
+                vscode.ConfigurationTarget.Workspace
+            );
+        await this._getReviewSettings();
+    }
+
+    private async _setFindingTriageStatus(
+        scopeKey: string,
+        findingId: string,
+        status: string
+    ) {
+        if (!isTriageStatus(status)) {
+            this._view?.webview.postMessage({
+                type: 'error',
+                message: `Invalid triage status: ${status}`,
+            });
+            return;
         }
 
+        const config = await this._ensureConfig();
+        const updated = await updateFindingTriageStatus(
+            config,
+            config.getOptions(),
+            scopeKey,
+            findingId,
+            status
+        );
+
+        if (!updated) {
+            this._view?.webview.postMessage({
+                type: 'error',
+                message: 'Failed to update finding triage status',
+            });
+            return;
+        }
+
+        this._view?.webview.postMessage({
+            type: 'triageStatusUpdated',
+            findingId,
+            status,
+        });
+    }
+
+    private async _quickReview(reviewKind: 'review' | 'branch' | 'commit') {
+        const config = await this._ensureConfig();
+
         try {
-            const branchList = await this._config.git.getBranchList(
-                undefined,
-                50
+            let reviewScope: ReviewScope | undefined;
+            if (reviewKind === 'commit') {
+                const commit = await pickCommit(config);
+                if (!commit) {
+                    return;
+                }
+                reviewScope = await config.git.getReviewScope(commit);
+            } else {
+                const refs = await pickRefs(
+                    config,
+                    reviewKind === 'branch' ? 'branch' : undefined
+                );
+                if (!refs) {
+                    return;
+                }
+
+                if (config.git.isValidRefPair(refs)) {
+                    reviewScope = await config.git.getReviewScope(
+                        refs.target,
+                        refs.base
+                    );
+                } else if (
+                    refs.target &&
+                    (await config.git.isInitialCommit(refs.target))
+                ) {
+                    reviewScope = await config.git.getReviewScope(
+                        refs.target,
+                        undefined
+                    );
+                }
+            }
+
+            if (!reviewScope) {
+                return;
+            }
+
+            this._pendingQuickReviewScope = reviewScope;
+            const description = this._describeReviewScope(reviewScope);
+            this._view?.webview.postMessage({
+                type: 'quickReviewPrepared',
+                description,
+            });
+        } catch (error) {
+            console.error('Error during quick review:', error);
+            this._view?.webview.postMessage({
+                type: 'reviewError',
+                message:
+                    error instanceof Error
+                        ? error.message
+                        : 'Unknown error occurred',
+            });
+        }
+    }
+
+    private _describeReviewScope(scope: ReviewScope): string {
+        if (!scope.isCommitted) {
+            return 'working tree changes';
+        }
+        return `${scope.target} vs ${scope.base}`;
+    }
+
+    private async _startQuickReview() {
+        if (!this._pendingQuickReviewScope) {
+            vscode.window.showInformationMessage(
+                'No pending review scope. Pick refs, branches, or a commit first.'
             );
+            return;
+        }
+
+        const reviewScope = this._pendingQuickReviewScope;
+        this._pendingQuickReviewScope = undefined;
+        this._view?.webview.postMessage({
+            type: 'quickReviewCleared',
+        });
+
+        try {
+            await this._executeReview({ scope: reviewScope });
+        } catch (error) {
+            console.error('Error starting quick review:', error);
+            this._view?.webview.postMessage({
+                type: 'reviewError',
+                message:
+                    error instanceof Error
+                        ? error.message
+                        : 'Unknown error occurred',
+            });
+        }
+    }
+
+    private async _getBranches() {
+        const config = await this._ensureConfig();
+
+        try {
+            const branchList = await config.git.getBranchList(undefined, 50);
             const branches = branchList
                 .map((b) => b.ref)
                 .filter((ref) => typeof ref === 'string');
 
             // Get current branch by finding the one marked as current
-            const currentBranchList = await this._config.git.getBranchList(
+            const currentBranchList = await config.git.getBranchList(
                 undefined,
                 1
             );
@@ -198,15 +493,10 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
     }
 
     private async _selectBaseBranch() {
-        if (!this._config) {
-            this._config = await getConfig();
-        }
+        const config = await this._ensureConfig();
 
         try {
-            const branchList = await this._config.git.getBranchList(
-                undefined,
-                50
-            );
+            const branchList = await config.git.getBranchList(undefined, 50);
             const branches = branchList
                 .map((b) => b.ref)
                 .filter((ref) => typeof ref === 'string');
@@ -232,15 +522,10 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
     }
 
     private async _selectTargetBranch() {
-        if (!this._config) {
-            this._config = await getConfig();
-        }
+        const config = await this._ensureConfig();
 
         try {
-            const branchList = await this._config.git.getBranchList(
-                undefined,
-                50
-            );
+            const branchList = await config.git.getBranchList(undefined, 50);
             const branches = branchList
                 .map((b) => b.ref)
                 .filter((ref) => typeof ref === 'string');
@@ -272,17 +557,14 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
     ) {
         // Suppress unused parameter warning
         void _reviewType;
-
-        if (!this._config) {
-            this._config = await getConfig();
-        }
+        const config = await this._ensureConfig();
 
         try {
-            const scope: ReviewScope = await this._config.git.getReviewScope(
+            const scope: ReviewScope = await config.git.getReviewScope(
                 targetBranch,
                 baseBranch
             );
-            const changedFiles = await this._config.git.getChangedFiles(scope);
+            const changedFiles = await config.git.getChangedFiles(scope);
 
             this._view?.webview.postMessage({
                 type: 'filesListLoaded',
@@ -308,16 +590,10 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
         baseBranch: string,
         reviewType: 'committed' | 'all'
     ) {
-        if (!this._config) {
-            this._config = await getConfig();
-        }
+        const config = await this._ensureConfig();
 
         try {
-            this._view?.webview.postMessage({
-                type: 'reviewStarted',
-            });
-
-            const scope: ReviewScope = await this._config.git.getReviewScope(
+            const scope: ReviewScope = await config.git.getReviewScope(
                 targetBranch,
                 baseBranch
             );
@@ -327,89 +603,7 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
                 // This would need additional implementation in the git utils
             }
 
-            const reviewRequest: ReviewRequest = { scope };
-
-            const progress = {
-                lastMessage: '',
-                report: ({ message }: { message: string }) => {
-                    if (message && message !== progress.lastMessage) {
-                        this._view?.webview.postMessage({
-                            type: 'reviewProgress',
-                            message: message,
-                        });
-                        progress.lastMessage = message;
-                    }
-                },
-            };
-
-            const result = await reviewDiff(
-                this._config,
-                reviewRequest,
-                progress,
-                new vscode.CancellationTokenSource().token
-            );
-
-            // Filter comments by severity and send progressive updates
-            const options = this._config.getOptions();
-            const filteredResults: FileComments[] = [];
-
-            // Store all comments for navigation
-            this._allComments = [];
-
-            // Add a delay between file results to simulate progressive updates
-            for (let index = 0; index < result.fileComments.length; index++) {
-                const file = result.fileComments[index];
-                const filteredFile = {
-                    ...file,
-                    comments: file.comments.filter(
-                        (comment) =>
-                            comment.severity >= options.minSeverity &&
-                            comment.line > 0
-                    ),
-                };
-
-                if (filteredFile.comments.length > 0) {
-                    filteredResults.push(filteredFile);
-
-                    // Add comments to navigation array
-                    filteredFile.comments.forEach((comment) => {
-                        this._allComments.push({
-                            filePath: file.target,
-                            line: comment.line,
-                            comment: comment.comment,
-                            proposedAdjustment: comment.proposedAdjustment,
-                        });
-                    });
-
-                    // Send individual file result with delay for visual effect
-                    this._view?.webview.postMessage({
-                        type: 'fileReviewCompleted',
-                        fileResult: filteredFile,
-                    });
-
-                    // Add a small delay to make the progressive effect visible
-                    await new Promise((resolve) => setTimeout(resolve, 300));
-                }
-
-                // Send progress update
-                this._view?.webview.postMessage({
-                    type: 'reviewProgress',
-                    message: `Processed ${index + 1}/${result.fileComments.length} files...`,
-                });
-            }
-
-            this._currentCommentIndex = -1;
-
-            // Hide status bar when no comments
-            if (this._statusBarItem) {
-                this._statusBarItem.hide();
-            }
-
-            this._view?.webview.postMessage({
-                type: 'reviewCompleted',
-                results: filteredResults,
-                errors: result.errors,
-            });
+            await this._executeReview({ scope });
         } catch (error) {
             console.error('Error during review:', error);
             this._view?.webview.postMessage({
@@ -420,6 +614,99 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
                         : 'Unknown error occurred',
             });
         }
+    }
+
+    private async _executeReview(reviewRequest: ReviewRequest) {
+        const config = await this._ensureConfig();
+
+        this._view?.webview.postMessage({
+            type: 'reviewStarted',
+        });
+
+        const progress = {
+            lastMessage: '',
+            report: ({ message }: { message: string }) => {
+                if (message && message !== progress.lastMessage) {
+                    this._view?.webview.postMessage({
+                        type: 'reviewProgress',
+                        message: message,
+                    });
+                    progress.lastMessage = message;
+                }
+            },
+        };
+
+        const result = await reviewDiff(
+            config,
+            reviewRequest,
+            progress,
+            new vscode.CancellationTokenSource().token
+        );
+
+        // Filter comments by severity and send progressive updates
+        const options = config.getOptions();
+        const filteredResults: FileComments[] = [];
+        this._currentScopeKey = result.summary?.scopeKey;
+
+        // Store all comments for navigation
+        this._allComments = [];
+
+        // Add a delay between file results to simulate progressive updates
+        for (let index = 0; index < result.fileComments.length; index++) {
+            const file = result.fileComments[index];
+            const filteredFile = {
+                ...file,
+                comments: file.comments.filter(
+                    (comment) =>
+                        comment.severity >= options.minSeverity &&
+                        comment.line > 0
+                ),
+            };
+
+            if (filteredFile.comments.length > 0) {
+                filteredResults.push(filteredFile);
+
+                // Add comments to navigation array
+                filteredFile.comments.forEach((comment) => {
+                    this._allComments.push({
+                        filePath: file.target,
+                        line: comment.line,
+                        comment: comment.comment,
+                        proposedAdjustment: comment.proposedAdjustment,
+                        findingId: comment.findingId,
+                    });
+                });
+
+                // Send individual file result with delay for visual effect
+                this._view?.webview.postMessage({
+                    type: 'fileReviewCompleted',
+                    fileResult: filteredFile,
+                });
+
+                // Add a small delay to make the progressive effect visible
+                await new Promise((resolve) => setTimeout(resolve, 300));
+            }
+
+            // Send progress update
+            this._view?.webview.postMessage({
+                type: 'reviewProgress',
+                message: `Processed ${index + 1}/${result.fileComments.length} files...`,
+            });
+        }
+
+        this._currentCommentIndex = -1;
+
+        // Hide status bar when no comments
+        if (this._statusBarItem) {
+            this._statusBarItem.hide();
+        }
+
+        this._view?.webview.postMessage({
+            type: 'reviewCompleted',
+            results: filteredResults,
+            errors: result.errors,
+            summary: result.summary,
+        });
     }
 
     private async _openFileWithComment(
@@ -454,14 +741,11 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
             baseBranch,
             targetBranch,
         });
-
-        if (!this._config) {
-            this._config = await getConfig();
-        }
+        const config = await this._ensureConfig();
 
         try {
             // Get the git root and build absolute path
-            const gitRoot = this._config.git.getGitRoot();
+            const gitRoot = config.git.getGitRoot();
             const absolutePath = path.join(gitRoot, filePath);
             const fileName = path.basename(filePath);
 
@@ -503,7 +787,7 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
                     `${baseBranch}:${relativeFilePath}`
                 );
                 // Use the raw git command to get file content from the base branch
-                const gitShowResult = await this._config.git.raw([
+                const gitShowResult = await config.git.raw([
                     'show',
                     `${baseBranch}:${relativeFilePath}`,
                 ]);
@@ -553,14 +837,14 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
                 );
 
                 // First, try to create a temp file with the base branch content
-                const gitRoot = this._config.git.getGitRoot();
+                const gitRoot = config.git.getGitRoot();
                 const absolutePath = path.join(gitRoot, filePath);
                 const relativeFilePath = path
                     .relative(gitRoot, absolutePath)
                     .replace(/\\/g, '/');
 
                 try {
-                    const baseContent = await this._config.git.raw([
+                    const baseContent = await config.git.raw([
                         'show',
                         `${baseBranch}:${relativeFilePath}`,
                     ]);
@@ -683,9 +967,7 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
 
         const commentData = this._allComments[index];
 
-        if (!this._config) {
-            this._config = await getConfig();
-        }
+        const config = await this._ensureConfig();
 
         try {
             // Clear existing comment threads
@@ -693,7 +975,7 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
             this._commentThreads = [];
 
             // Convert relative path to absolute path using git root
-            const gitRoot = this._config.git.getGitRoot();
+            const gitRoot = config.git.getGitRoot();
             const absolutePath = path.join(gitRoot, commentData.filePath);
             console.log('Converted path:', {
                 filePath: commentData.filePath,
@@ -745,6 +1027,8 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
                 `**Review Comment (${currentNum}/${totalNum}):**\n\n${commentData.comment}`
             );
 
+            const actionLinks: string[] = [];
+
             // Add proposed adjustment if available
             if (commentData.proposedAdjustment) {
                 const adjustment = commentData.proposedAdjustment;
@@ -766,13 +1050,23 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
                         adjustedCode: adjustment.adjustedCode,
                         startLine: adjustment.startLine,
                         endLine: adjustment.endLine,
+                        lineHint: commentData.line,
                     },
                 ]);
 
-                markdownBody.appendMarkdown(
-                    `\n\n[Apply Fix](command:codeReview.applyAdjustment?${encodeURIComponent(commandArgs)})`
+                actionLinks.push(
+                    `[Apply Fix](command:codeReview.applyAdjustment?${encodeURIComponent(commandArgs)})`
                 );
             }
+
+            actionLinks.push('[Skip](command:codeReview.skipComment)');
+            actionLinks.push(
+                '[Accept](command:codeReview.acceptCurrentComment)'
+            );
+            actionLinks.push(
+                '[Discard](command:codeReview.discardCurrentComment)'
+            );
+            markdownBody.appendMarkdown(`\n\n${actionLinks.join(' • ')}`);
 
             markdownBody.isTrusted = true; // Allow command URIs
             markdownBody.supportHtml = true; // Allow HTML for better markdown rendering
@@ -784,7 +1078,7 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
                     name: 'Github Copilot Code Reviewer',
                     iconPath: vscode.Uri.joinPath(
                         this._extensionUri,
-                        'images/icon.png'
+                        'images/icon_compressed.png'
                     ),
                 },
                 contextValue: 'codeReview-comment',
@@ -822,12 +1116,111 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
         }
     }
 
+    public triggerBranchReview(reviewType: 'committed' | 'all') {
+        if (!this._view) {
+            vscode.window.showInformationMessage(
+                'Open the Code Review sidebar and select branches before starting a review.'
+            );
+            return;
+        }
+
+        this._view.webview.postMessage({
+            type: 'triggerBranchReview',
+            reviewType,
+        });
+    }
+
     public async navigateToNext() {
         await this._navigateToComment('next');
     }
 
     public async navigateToPrevious() {
         await this._navigateToComment('previous');
+    }
+
+    public async discardCurrentComment() {
+        await this._resolveCurrentComment('Comment discarded.');
+    }
+
+    public async acceptCurrentComment() {
+        if (
+            this._currentCommentIndex < 0 ||
+            this._currentCommentIndex >= this._allComments.length
+        ) {
+            vscode.window.showInformationMessage(
+                'No active comment to accept.'
+            );
+            return;
+        }
+
+        const currentComment = this._allComments[this._currentCommentIndex];
+        const findingId = currentComment.findingId;
+        const scopeKey = this._currentScopeKey;
+
+        if (findingId && scopeKey) {
+            try {
+                const config = await this._ensureConfig();
+                const updated = await updateFindingTriageStatus(
+                    config,
+                    config.getOptions(),
+                    scopeKey,
+                    findingId,
+                    'accepted'
+                );
+
+                if (updated) {
+                    this._view?.webview.postMessage({
+                        type: 'triageStatusUpdated',
+                        findingId,
+                        status: 'accepted',
+                    });
+                } else {
+                    vscode.window.showWarningMessage(
+                        'Could not persist accepted status for this finding. Comment was resolved locally.'
+                    );
+                }
+            } catch (error) {
+                console.error('Error accepting finding:', error);
+                vscode.window.showWarningMessage(
+                    'Could not persist accepted status for this finding. Comment was resolved locally.'
+                );
+            }
+        } else {
+            vscode.window.showInformationMessage(
+                'Accepted locally. Finding metadata was unavailable for persistent triage.'
+            );
+        }
+
+        await this._resolveCurrentComment('Comment accepted.');
+    }
+
+    private async _resolveCurrentComment(messagePrefix: string) {
+        if (
+            this._currentCommentIndex < 0 ||
+            this._currentCommentIndex >= this._allComments.length
+        ) {
+            vscode.window.showInformationMessage('No active comment.');
+            return;
+        }
+
+        this._allComments.splice(this._currentCommentIndex, 1);
+        this._commentThreads.forEach((thread) => thread.dispose());
+        this._commentThreads = [];
+
+        if (this._allComments.length === 0) {
+            this._currentCommentIndex = -1;
+            this._statusBarItem?.hide();
+            vscode.window.showInformationMessage(
+                `${messagePrefix} No more review comments.`
+            );
+            return;
+        }
+
+        if (this._currentCommentIndex >= this._allComments.length) {
+            this._currentCommentIndex = 0;
+        }
+
+        await this._showCommentAtIndex(this._currentCommentIndex);
     }
 
     public dispose() {
@@ -862,19 +1255,18 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
 
         try {
             // Ensure config is loaded
-            if (!this._config) {
-                console.log('Loading config for chat review results...');
-                this._config = await getConfig();
-            }
+            console.log('Loading config for chat review results...');
+            const config = await this._ensureConfig();
 
             // Convert ReviewResult to the format expected by the webview
-            const options = this._config.getOptions();
+            const options = config.getOptions();
             console.log('Using options:', options);
 
             const filteredResults: FileComments[] = [];
 
             // Store all comments for navigation
             this._allComments = [];
+            this._currentScopeKey = results.summary?.scopeKey;
 
             for (const file of results.fileComments) {
                 const filteredFile = {
@@ -896,6 +1288,7 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
                             line: comment.line,
                             comment: comment.comment,
                             proposedAdjustment: comment.proposedAdjustment,
+                            findingId: comment.findingId,
                         });
                     });
                 }
@@ -922,6 +1315,7 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
                     type: 'reviewCompleted',
                     results: filteredResults,
                     errors: results.errors || [],
+                    summary: results.summary,
                 });
             }, 150);
 
@@ -948,89 +1342,14 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
         startLine?: number,
         endLine?: number
     ) {
-        try {
-            if (!this._config) {
-                this._config = await getConfig();
-            }
-
-            // Convert relative path to absolute path using git root
-            const gitRoot = this._config.git.getGitRoot();
-            const absolutePath = path.join(gitRoot, filePath);
-
-            // Open the file
-            const uri = vscode.Uri.file(absolutePath);
-            const document = await vscode.workspace.openTextDocument(uri);
-            const editor = await vscode.window.showTextDocument(document);
-
-            // Find the location of the original code in the document
-            const text = document.getText();
-            let targetRange: vscode.Range;
-
-            if (startLine !== undefined && endLine !== undefined) {
-                // Use provided line range
-                const start = new vscode.Position(
-                    Math.max(0, startLine - 1),
-                    0
-                );
-                const end = new vscode.Position(
-                    Math.max(0, endLine - 1),
-                    document.lineAt(
-                        Math.min(endLine - 1, document.lineCount - 1)
-                    ).text.length
-                );
-                targetRange = new vscode.Range(start, end);
-            } else {
-                // Search for the original code in the document
-                const originalCodeIndex = text.indexOf(originalCode);
-                if (originalCodeIndex === -1) {
-                    vscode.window.showErrorMessage(
-                        `Could not find the original code in ${filePath}. The file may have been modified since the review.`
-                    );
-                    return;
-                }
-
-                // Convert character index to line/column position
-                const startPos = document.positionAt(originalCodeIndex);
-                const endPos = document.positionAt(
-                    originalCodeIndex + originalCode.length
-                );
-                targetRange = new vscode.Range(startPos, endPos);
-            }
-
-            // Apply the edit
-            const workspaceEdit = new vscode.WorkspaceEdit();
-            workspaceEdit.replace(uri, targetRange, adjustedCode);
-
-            const success = await vscode.workspace.applyEdit(workspaceEdit);
-
-            if (success) {
-                vscode.window.showInformationMessage(
-                    `Applied code adjustment to ${path.basename(filePath)}`
-                );
-
-                // Navigate to the applied change
-                const newEndPos = document.positionAt(
-                    targetRange.start.character + adjustedCode.length
-                );
-                editor.selection = new vscode.Selection(
-                    targetRange.start,
-                    newEndPos
-                );
-                editor.revealRange(
-                    new vscode.Range(targetRange.start, newEndPos),
-                    vscode.TextEditorRevealType.InCenter
-                );
-            } else {
-                vscode.window.showErrorMessage(
-                    `Failed to apply code adjustment to ${filePath}`
-                );
-            }
-        } catch (error) {
-            console.error('Error applying adjustment:', error);
-            vscode.window.showErrorMessage(
-                `Error applying adjustment: ${error instanceof Error ? error.message : 'Unknown error'}`
-            );
-        }
+        await this.applyAdjustment({
+            filePath,
+            originalCode,
+            adjustedCode,
+            startLine,
+            endLine,
+            lineHint: startLine,
+        });
     }
 
     // Method to apply the adjustment for the current comment being viewed
@@ -1060,6 +1379,7 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
             adjustedCode: adjustment.adjustedCode,
             startLine: adjustment.startLine,
             endLine: adjustment.endLine,
+            lineHint: currentComment.line,
         });
     }
 
@@ -1070,14 +1390,13 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
         adjustedCode: string;
         startLine?: number;
         endLine?: number;
+        lineHint?: number;
     }): Promise<void> {
         try {
-            if (!this._config) {
-                this._config = await getConfig();
-            }
+            const config = await this._ensureConfig();
 
             // Convert relative path to absolute path using git root
-            const gitRoot = this._config.git.getGitRoot();
+            const gitRoot = config.git.getGitRoot();
             const absolutePath = path.join(gitRoot, adjustmentData.filePath);
 
             console.log('Applying adjustment:', {
@@ -1087,103 +1406,45 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
                 adjustedCodeLength: adjustmentData.adjustedCode.length,
                 startLine: adjustmentData.startLine,
                 endLine: adjustmentData.endLine,
+                lineHint: adjustmentData.lineHint,
             });
 
             const document =
                 await vscode.workspace.openTextDocument(absolutePath);
             const editor = await vscode.window.showTextDocument(document);
+            const originalCode = this._sanitizeAdjustmentCode(
+                adjustmentData.originalCode
+            );
+            const adjustedCode = this._sanitizeAdjustmentCode(
+                adjustmentData.adjustedCode
+            );
 
-            let range: vscode.Range;
+            let range = this._resolveAdjustmentRange(
+                document,
+                originalCode,
+                adjustmentData.startLine,
+                adjustmentData.endLine,
+                adjustmentData.lineHint
+            );
 
-            // Priority 1: Use line range if available
-            if (
-                adjustmentData.startLine !== undefined &&
-                adjustmentData.endLine !== undefined
-            ) {
-                console.log('Using line range approach');
-                range = new vscode.Range(
-                    Math.max(0, adjustmentData.startLine - 1),
-                    0,
-                    Math.max(
-                        0,
-                        Math.min(
-                            adjustmentData.endLine - 1,
-                            document.lineCount - 1
-                        )
-                    ),
-                    document.lineAt(
-                        Math.min(
-                            adjustmentData.endLine - 1,
-                            document.lineCount - 1
-                        )
-                    ).text.length
+            if (!range) {
+                const choice = await vscode.window.showErrorMessage(
+                    'Could not automatically locate the code to replace. Would you like to select it manually?',
+                    'Select Manually',
+                    'Cancel'
                 );
-            } else {
-                // Priority 2: Try exact string match
-                console.log('Trying exact string match');
-                const text = document.getText();
-                let originalIndex = text.indexOf(adjustmentData.originalCode);
 
-                if (originalIndex === -1) {
-                    console.log('Exact match failed, trying normalized search');
-                    // Priority 3: Try normalized string matching (ignore whitespace differences)
-                    const normalizeCode = (code: string) =>
-                        code.replace(/\s+/g, ' ').trim();
-                    const normalizedOriginal = normalizeCode(
-                        adjustmentData.originalCode
-                    );
-                    const normalizedText = normalizeCode(text);
-
-                    const normalizedIndex =
-                        normalizedText.indexOf(normalizedOriginal);
-                    if (normalizedIndex !== -1) {
-                        // Find the actual position by counting characters with original spacing
-                        let actualIndex = 0;
-                        let normalizedPos = 0;
-                        for (
-                            let i = 0;
-                            i < text.length && normalizedPos < normalizedIndex;
-                            i++
-                        ) {
-                            if (!/\s/.test(text[i])) {
-                                normalizedPos++;
-                            }
-                            actualIndex = i + 1;
-                        }
-                        originalIndex = actualIndex;
-                        console.log(
-                            'Found using normalized matching at index:',
-                            originalIndex
+                if (choice === 'Select Manually') {
+                    const selection = editor.selection;
+                    if (selection.isEmpty) {
+                        vscode.window.showInformationMessage(
+                            'Please select the code you want to replace and try again.'
                         );
-                    }
-                }
-
-                if (originalIndex === -1) {
-                    // Priority 4: Show user a selection dialog for manual selection
-                    const choice = await vscode.window.showErrorMessage(
-                        'Could not automatically locate the code to replace. Would you like to select it manually?',
-                        'Select Manually',
-                        'Cancel'
-                    );
-
-                    if (choice === 'Select Manually') {
-                        const selection = editor.selection;
-                        if (selection.isEmpty) {
-                            vscode.window.showInformationMessage(
-                                'Please select the code you want to replace and try again.'
-                            );
-                            return;
-                        }
-                        range = selection;
-                    } else {
                         return;
                     }
+                    range = selection;
                 } else {
-                    const startPos = document.positionAt(originalIndex);
-                    const endPos = document.positionAt(
-                        originalIndex + adjustmentData.originalCode.length
-                    );
-                    range = new vscode.Range(startPos, endPos);
+                    return;
                 }
             }
 
@@ -1195,7 +1456,7 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
             });
 
             const success = await editor.edit((editBuilder) => {
-                editBuilder.replace(range, adjustmentData.adjustedCode);
+                editBuilder.replace(range, adjustedCode);
             });
 
             if (success) {
@@ -1205,8 +1466,7 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
 
                 // Navigate to the applied change
                 const newEndPos = document.positionAt(
-                    document.offsetAt(range.start) +
-                        adjustmentData.adjustedCode.length
+                    document.offsetAt(range.start) + adjustedCode.length
                 );
                 editor.selection = new vscode.Selection(range.start, newEndPos);
                 editor.revealRange(
@@ -1226,6 +1486,192 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
                 `Failed to apply adjustment: ${errorMessage}`
             );
         }
+    }
+
+    private _sanitizeAdjustmentCode(code: string): string {
+        const normalized = code.replace(/\r\n/g, '\n').trim();
+        if (!normalized.startsWith('```')) {
+            return normalized;
+        }
+
+        const lines = normalized.split('\n');
+        if (
+            lines.length >= 2 &&
+            lines[0].startsWith('```') &&
+            lines[lines.length - 1].startsWith('```')
+        ) {
+            return lines.slice(1, -1).join('\n').trim();
+        }
+
+        return normalized;
+    }
+
+    private _resolveAdjustmentRange(
+        document: vscode.TextDocument,
+        originalCode: string,
+        startLine?: number,
+        endLine?: number,
+        lineHint?: number
+    ): vscode.Range | undefined {
+        if (startLine !== undefined && endLine !== undefined) {
+            return this._toLineRange(document, startLine, endLine);
+        }
+
+        const text = document.getText();
+        const originalCodeIndex = text.indexOf(originalCode);
+        if (originalCodeIndex !== -1) {
+            const startPos = document.positionAt(originalCodeIndex);
+            const endPos = document.positionAt(
+                originalCodeIndex + originalCode.length
+            );
+            return new vscode.Range(startPos, endPos);
+        }
+
+        const fuzzyAroundHint = this._findFuzzyLineBlockRange(
+            document,
+            originalCode,
+            lineHint
+        );
+        if (fuzzyAroundHint) {
+            return fuzzyAroundHint;
+        }
+
+        return this._findFuzzyLineBlockRange(document, originalCode);
+    }
+
+    private _toLineRange(
+        document: vscode.TextDocument,
+        startLine: number,
+        endLine: number
+    ): vscode.Range {
+        const safeStartLine = Math.max(
+            0,
+            Math.min(startLine - 1, document.lineCount - 1)
+        );
+        const safeEndLine = Math.max(
+            safeStartLine,
+            Math.min(endLine - 1, document.lineCount - 1)
+        );
+        return new vscode.Range(
+            safeStartLine,
+            0,
+            safeEndLine,
+            document.lineAt(safeEndLine).text.length
+        );
+    }
+
+    private _findFuzzyLineBlockRange(
+        document: vscode.TextDocument,
+        originalCode: string,
+        lineHint?: number
+    ): vscode.Range | undefined {
+        const codeLines = this._toComparableLines(originalCode);
+        if (codeLines.length === 0) {
+            return undefined;
+        }
+        if (codeLines.length > document.lineCount) {
+            return undefined;
+        }
+
+        const searchRadius = 80;
+        const maxStartLine = document.lineCount - codeLines.length;
+        const preferredStart =
+            lineHint && lineHint > 0
+                ? Math.max(0, Math.min(lineHint - 1, maxStartLine))
+                : 0;
+        const startLine =
+            lineHint && lineHint > 0
+                ? Math.max(0, preferredStart - searchRadius)
+                : 0;
+        const endLine =
+            lineHint && lineHint > 0
+                ? Math.min(maxStartLine, preferredStart + searchRadius)
+                : maxStartLine;
+
+        let bestStart = -1;
+        let bestScore = Number.NEGATIVE_INFINITY;
+
+        for (
+            let candidateStart = startLine;
+            candidateStart <= endLine;
+            candidateStart++
+        ) {
+            const score = this._scoreCandidateBlock(
+                document,
+                candidateStart,
+                codeLines
+            );
+            if (score > bestScore) {
+                bestScore = score;
+                bestStart = candidateStart;
+            }
+        }
+
+        const minScore = Math.max(2, codeLines.length * 1.2);
+        if (bestStart < 0 || bestScore < minScore) {
+            return undefined;
+        }
+
+        const rangeEndLine = bestStart + codeLines.length - 1;
+        return new vscode.Range(
+            bestStart,
+            0,
+            rangeEndLine,
+            document.lineAt(rangeEndLine).text.length
+        );
+    }
+
+    private _toComparableLines(code: string): string[] {
+        const lines = code.replace(/\r\n/g, '\n').split('\n');
+        while (lines.length > 0 && lines[0].trim().length === 0) {
+            lines.shift();
+        }
+        while (
+            lines.length > 0 &&
+            lines[lines.length - 1].trim().length === 0
+        ) {
+            lines.pop();
+        }
+        return lines;
+    }
+
+    private _scoreCandidateBlock(
+        document: vscode.TextDocument,
+        startLine: number,
+        expectedLines: string[]
+    ): number {
+        let score = 0;
+
+        for (let index = 0; index < expectedLines.length; index++) {
+            const expected = this._normalizeCodeLine(expectedLines[index]);
+            const actual = this._normalizeCodeLine(
+                document.lineAt(startLine + index).text
+            );
+
+            if (!expected && !actual) {
+                score += 1;
+                continue;
+            }
+
+            if (expected === actual) {
+                score += 2;
+                continue;
+            }
+
+            if (
+                expected.length > 0 &&
+                actual.length > 0 &&
+                (actual.includes(expected) || expected.includes(actual))
+            ) {
+                score += 1;
+            }
+        }
+
+        return score;
+    }
+
+    private _normalizeCodeLine(line: string): string {
+        return line.replace(/\s+/g, ' ').trim();
     }
 
     private _getHtmlForWebview(webview: vscode.Webview) {
@@ -1257,6 +1703,61 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
 </head>
 <body>
     <div class="container">
+        <div class="section" id="reviewSetupSection">
+            <h3 class="section-header" data-section="reviewSetupSection">
+                <div class="section-title">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path stroke="none" d="M0 0h24v24H0z" fill="none"/>
+                        <path d="M4 13h6" />
+                        <path d="M12 13h8" />
+                        <path d="M4 6h16" />
+                        <path d="M4 20h16" />
+                        <path d="M8 10v6" />
+                    </svg>
+                    Review Setup
+                </div>
+                <svg class="section-chevron" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path stroke="none" d="M0 0h24v24H0z" fill="none"/>
+                    <path d="M6 9l6 6l6 -6" />
+                </svg>
+            </h3>
+            <div class="section-content" id="reviewSetupContent">
+                <div class="setup-row">
+                    <span class="setup-label">Mode</span>
+                    <span id="reviewModeValue" class="mode-badge" data-mode="general">General</span>
+                    <button id="selectModeButton" class="secondary-button">Change</button>
+                </div>
+                <div class="setup-row">
+                    <span class="setup-label">Model</span>
+                    <span id="reviewModelValue" class="repository-value">gpt-4o</span>
+                    <button id="selectModelButton" class="secondary-button">Change</button>
+                </div>
+                <div class="setup-row repository-row">
+                    <span class="setup-label">Repository</span>
+                    <span id="repositoryPathValue" class="repository-value">(workspace root)</span>
+                    <button id="selectRepositoryButton" class="secondary-button">Change</button>
+                </div>
+                <div class="setup-row setup-toggles">
+                    <label class="toggle-label" for="incrementalToggle">
+                        <input type="checkbox" id="incrementalToggle" />
+                        Incremental re-review
+                    </label>
+                </div>
+                <div class="setup-row setup-toggles">
+                    <label class="toggle-label" for="hideTriagedToggle">
+                        <input type="checkbox" id="hideTriagedToggle" />
+                        Hide triaged findings
+                    </label>
+                </div>
+                <div class="quick-actions-grid">
+                    <button id="quickReviewAnyButton" class="quick-action-button">Pick refs (branch/tag/commit)</button>
+                    <button id="quickReviewBranchButton" class="quick-action-button">Pick branches</button>
+                    <button id="quickReviewCommitButton" class="quick-action-button">Pick commit</button>
+                    <button id="startQuickReviewButton" class="quick-action-button quick-start-button disabled" disabled>Start Review</button>
+                </div>
+            </div>
+        </div>
+
         <div class="section" id="branchComparisonSection">
             <h3 class="section-header" data-section="branchComparisonSection">
                 <div class="section-title">
@@ -1386,6 +1887,9 @@ export class CodeReviewPanel implements vscode.WebviewViewProvider {
                 <div id="reviewStatus" class="review-status hidden">
                     <div class="spinner"></div>
                     <span id="reviewStatusText">Starting review...</span>
+                </div>
+                <div id="reviewSummary" class="review-summary hidden">
+                    <!-- Review summary card is populated dynamically -->
                 </div>
                 <div id="reviewResults" class="results">
                     <!-- Review results will be populated here -->

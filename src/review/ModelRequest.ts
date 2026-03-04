@@ -3,7 +3,7 @@ import type { CancellationToken } from 'vscode';
 import type { Config, Options } from '@/types/Config';
 import type { Model } from '@/types/Model';
 import { type PromptType } from '../types/PromptType';
-import { createReviewPrompt } from './prompt';
+import { createReviewPrompt, type ReviewPromptContext } from './prompt';
 
 export class ModelRequest {
     public files: string[] = [];
@@ -13,7 +13,8 @@ export class ModelRequest {
 
     constructor(
         private readonly config: Config,
-        private changeDescription: string | undefined
+        private changeDescription: string | undefined,
+        private promptContext?: ReviewPromptContext
     ) {
         this.options = config.getOptions();
     }
@@ -136,7 +137,8 @@ export class ModelRequest {
             this.changeDescription,
             diff,
             this.options.customPrompt,
-            promptType
+            promptType,
+            this.promptContext
         );
     }
 }

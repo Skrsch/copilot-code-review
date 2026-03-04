@@ -1,4 +1,5 @@
 import type { PromptType } from './PromptType';
+import type { TriageStatus } from './TriageStatus';
 
 export type ProposedAdjustment = {
     originalCode: string; // the original code block that needs to be changed
@@ -15,4 +16,7 @@ export type ReviewComment = {
     severity: number; // in 0..5
     promptType?: PromptType; // which prompt was used to generate this comment (if overridden)
     proposedAdjustment?: ProposedAdjustment; // optional proposed code adjustment
+    findingId?: string; // stable identifier used for baseline tracking and triage
+    triageStatus?: TriageStatus; // optional triage status from baseline
+    findingState?: 'new' | 'existing'; // indicates whether the finding is new in current review
 };

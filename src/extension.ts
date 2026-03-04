@@ -5,9 +5,12 @@ import { Config } from '@/types/Config';
 import { UncommittedRef } from '@/types/Ref';
 import { ReviewRequest, ReviewScope } from '@/types/ReviewRequest';
 import { ReviewResult } from '@/types/ReviewResult';
+import { ReviewSummary } from '@/types/ReviewSummary';
+import { normalizeReviewMode, reviewModes } from '@/types/ReviewMode';
 import { parseArguments } from '@/utils/parseArguments';
 import { CodeReviewPanel } from '@/vscode/CodeReviewPanel';
 import { getConfig, toUri } from '@/vscode/config';
+import { selectRepository } from '@/vscode/repositoryPicker';
 import { ReviewTool } from '@/vscode/ReviewTool';
 import { pickCommit, pickRef, pickRefs } from '@/vscode/ui';
 
@@ -22,7 +25,7 @@ export function activate(context: vscode.ExtensionContext) {
     );
     chatParticipant.iconPath = vscode.Uri.joinPath(
         context.extensionUri,
-        'images/chat_icon.png'
+        'images/icon_compressed.png'
     );
 
     // Register the Code Review Panel
@@ -41,10 +44,42 @@ export function activate(context: vscode.ExtensionContext) {
             handleSelectChatModel
         )
     );
+    context.subscriptions.push(
+        vscode.commands.registerCommand(
+            'codeReview.selectReviewMode',
+            handleSelectReviewMode
+        )
+    );
+    context.subscriptions.push(
+        vscode.commands.registerCommand(
+            'codeReview.selectRepository',
+            handleSelectRepository
+        )
+    );
 
     context.subscriptions.push(
         vscode.commands.registerCommand('codeReview.refreshCodeReview', () =>
             codeReviewPanel.refresh()
+        )
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand(
+            'codeReview.reviewCommittedChanges',
+            async () => {
+                await openCodeReviewView();
+                codeReviewPanel.triggerBranchReview('committed');
+            }
+        )
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand(
+            'codeReview.reviewAllChanges',
+            async () => {
+                await openCodeReviewView();
+                codeReviewPanel.triggerBranchReview('all');
+            }
         )
     );
 
@@ -61,15 +96,28 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(
+        vscode.commands.registerCommand('codeReview.skipComment', () =>
+            codeReviewPanel.navigateToNext()
+        )
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand(
+            'codeReview.discardCurrentComment',
+            () => codeReviewPanel.discardCurrentComment()
+        )
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('codeReview.acceptCurrentComment', () =>
+            codeReviewPanel.acceptCurrentComment()
+        )
+    );
+
+    context.subscriptions.push(
         vscode.commands.registerCommand(
             'codeReview.openCodeReviewPanel',
-            async () => {
-                await vscode.commands.executeCommand('workbench.view.scm');
-                // Focus on the Code Review section if possible
-                await vscode.commands.executeCommand(
-                    'codeReview.codeReview.focus'
-                );
-            }
+            async () => await openCodeReviewView()
         )
     );
 
@@ -115,6 +163,7 @@ export function activate(context: vscode.ExtensionContext) {
                         adjustedCode: string;
                         startLine?: number;
                         endLine?: number;
+                        lineHint?: number;
                     };
 
                     // Handle VS Code command URI with JSON array argument
@@ -164,6 +213,10 @@ export function activate(context: vscode.ExtensionContext) {
                             endLine:
                                 args[4] && typeof args[4] === 'string'
                                     ? parseInt(decodeURIComponent(args[4]))
+                                    : undefined,
+                            lineHint:
+                                args[5] && typeof args[5] === 'string'
+                                    ? parseInt(decodeURIComponent(args[5]))
                                     : undefined,
                         };
                     } else {
@@ -262,6 +315,9 @@ async function handleChat(
             return;
         }
     }
+    stream.markdown(
+        `Review mode: \`${normalizeReviewMode(config.getOptions().reviewMode)}\`.\n\n`
+    );
     const results = await review(config, reviewRequest, stream, token);
 
     // Check if there are any problems to show before opening the panel
@@ -273,17 +329,16 @@ async function handleChat(
         );
     });
 
-    // Only open Source Control panel and show results if there are actual problems
+    // Only open the Code Review sidebar and show results if there are actual problems
     if (codeReviewPanel && filteredResults.length > 0) {
-        // Open Source Control panel and show results in the Code Review view
-        await vscode.commands.executeCommand('workbench.view.scm');
+        await openCodeReviewView();
 
-        // Send the results to the Source Control panel
+        // Send the results to the Code Review panel
         await codeReviewPanel.displayChatReviewResults(results);
 
-        // Send message to indicate results are available in the Source Control panel with a clickable command
+        // Send message to indicate results are available in the Code Review panel with a clickable command
         stream.markdown(
-            `\n\n**Review results are also available in the Source Control panel**\n\n`
+            `\n\n**Review results are also available in the Code Review sidebar panel**\n\n`
         );
         stream.button({
             command: 'codeReview.openCodeReviewPanel',
@@ -452,6 +507,8 @@ function showReviewResults(
         );
     }
 
+    appendReviewContextNote(result.summary, stream);
+
     if (result.errors.length > 0) {
         for (const error of result.errors) {
             config.logger.info('Error: ', error.message, error.stack);
@@ -464,6 +521,28 @@ function showReviewResults(
             `${result.errors.length} error(s) occurred during review:\n${errorString}`
         );
     }
+}
+
+function appendReviewContextNote(
+    summary: ReviewSummary | undefined,
+    stream: vscode.ChatResponseStream
+) {
+    if (!summary) {
+        return;
+    }
+
+    const formatList = (values: string[]) =>
+        values.length > 0
+            ? values.map((value) => `\`${value}\``).join(', ')
+            : 'none';
+
+    const resources = formatList(summary.resourcesUsed ?? []);
+    const tools = formatList(summary.toolsUsed ?? []);
+    const model = summary.modelUsed || 'unknown';
+
+    stream.markdown(
+        `\n\n_Context: model \`${model}\`; resources: ${resources}; tools: ${tools}._`
+    );
 }
 
 async function handleSelectChatModel() {
@@ -502,4 +581,75 @@ async function handleSelectChatModel() {
             `codeReview chat model set to: ${selectedQuickPickItem.name}`
         );
     }
+}
+
+async function handleSelectReviewMode() {
+    const modes = reviewModes;
+    const config = await getConfig();
+    const currentMode = normalizeReviewMode(config.getOptions().reviewMode);
+
+    const modeLabels = {
+        general: 'General',
+        architectural: 'Architectural',
+        styleguide: 'Styleguide',
+        performance: 'Performance',
+    } as const;
+    const modeDescriptions = {
+        general: 'Balanced code review for bugs, risks, and code quality',
+        architectural:
+            'High-level review focused on design, boundaries, and maintainability',
+        styleguide:
+            'Checks changes against your styleguide and optional copilot instructions',
+        performance:
+            'Targets runtime and memory regressions, expensive operations, and hot-path risks',
+    } as const;
+
+    const quickPickItems = modes.map((mode) => {
+        const prefix = mode === currentMode ? '$(check)' : '\u2003 '; // em space
+        return {
+            label: prefix + modeLabels[mode],
+            description: modeDescriptions[mode],
+            id: mode,
+            name: modeLabels[mode],
+        };
+    });
+
+    const selectedQuickPickItem = await vscode.window.showQuickPick(
+        quickPickItems,
+        { placeHolder: 'Select a review mode for codeReview reviews' }
+    );
+
+    if (selectedQuickPickItem) {
+        await vscode.workspace
+            .getConfiguration('codeReview')
+            .update(
+                'reviewMode',
+                selectedQuickPickItem.id,
+                vscode.ConfigurationTarget.Workspace
+            );
+        codeReviewPanel.refresh();
+        vscode.window.showInformationMessage(
+            `codeReview review mode set to: ${selectedQuickPickItem.name}`
+        );
+    }
+}
+
+async function handleSelectRepository() {
+    const config = await getConfig();
+    const changed = await selectRepository(config);
+    if (changed) {
+        codeReviewPanel.refresh();
+    }
+}
+
+async function openCodeReviewView() {
+    try {
+        await vscode.commands.executeCommand(
+            'workbench.view.extension.codeReviewSidebar'
+        );
+    } catch {
+        // Fallback for environments where the container command is unavailable.
+        await vscode.commands.executeCommand('workbench.view.scm');
+    }
+    await vscode.commands.executeCommand('codeReview.codeReview.focus');
 }

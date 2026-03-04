@@ -7,6 +7,5 @@ coverage
 
 images/*
 !images/icon.png
-!images/icon.xcf
-!images/chat_icon.png
-!images/demo.gif
+!images/icon_compressed.png
+!images/icon.svg

@@ -1,5 +1,18 @@
 # Change Log
 
+## [Unreleased]
+- Add `codeReview.repositoryPath` setting to select which Git repository is reviewed (supports workspace-relative and absolute paths).
+- Add repository picker command (`codeReview: Select Repository`) and sidebar action to switch repositories directly from the UI.
+- Add configurable review modes (`general`, `architectural`, `styleguide`, `performance`) and a `codeReview: Select Review Mode` command.
+- Add styleguide review support via `codeReview.styleguide` and optional `.github/copilot-instructions.md` / `copilot-instructions.md` loading.
+- Move the review UI into a dedicated Activity Bar sidebar container with quick actions for mode, branch, and commit reviews.
+- Add a model selector directly in the sidebar review setup section.
+- Add support for repository instruction files in `.github/instructions/*.md` (including `applyTo` filtering) via `codeReview.useGithubInstructions`.
+- Add a post-review context note (chat + sidebar) showing model used and additional resources/tools used for the review.
+- Add incremental re-review with persisted baseline tracking (`codeReview.incrementalReReview`, `codeReview.baselineFilePath`).
+- Add finding triage actions (open/accepted/not-an-issue) and optional hiding of triaged findings (`codeReview.hideTriagedFindings`).
+- Add a review summary card in the sidebar showing new/carried/resolved findings and severity distribution.
+
 ## [0.22.2]
 - Updated readme
 

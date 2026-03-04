@@ -2,11 +2,15 @@
   "name": "github-copilot-code-reviewer",
   "displayName": "Github Copilot Code Reviewer",
   "description": "Review source code changes in Git using GitHub Copilot",
-  "publisher": "jakubkozera",
+  "publisher": "sauercherry",
   "version": "0.22.2",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jakubkozera/vsc-copilot-code-review"
+    "url": "https://github.com/Skrsch/copilot-code-review"
+  },
+  "homepage": "https://github.com/Skrsch/copilot-code-review#readme",
+  "bugs": {
+    "url": "https://github.com/Skrsch/copilot-code-review/issues"
   },
   "engines": {
     "vscode": "^1.99.1"
@@ -24,7 +28,7 @@
     "git",
     "review"
   ],
-  "icon": "images/icon.png",
+  "icon": "images/icon_compressed.png",
   "license": "SEE LICENSE IN LICENSE",
   "activationEvents": [],
   "main": "./out/extension.js",
@@ -34,6 +38,16 @@
       {
         "command": "codeReview.selectChatModel",
         "title": "Select Chat Model",
+        "category": "codeReview"
+      },
+      {
+        "command": "codeReview.selectReviewMode",
+        "title": "Select Review Mode",
+        "category": "codeReview"
+      },
+      {
+        "command": "codeReview.selectRepository",
+        "title": "Select Repository",
         "category": "codeReview"
       },
       {
@@ -64,9 +78,27 @@
       },
       {
         "command": "codeReview.previousComment",
-        "title": "Previous Comment", 
+        "title": "Previous Comment",
         "category": "codeReview",
         "icon": "$(arrow-left)"
+      },
+      {
+        "command": "codeReview.skipComment",
+        "title": "Skip Comment",
+        "category": "codeReview",
+        "icon": "$(arrow-right)"
+      },
+      {
+        "command": "codeReview.discardCurrentComment",
+        "title": "Discard Comment",
+        "category": "codeReview",
+        "icon": "$(close)"
+      },
+      {
+        "command": "codeReview.acceptCurrentComment",
+        "title": "Accept Comment",
+        "category": "codeReview",
+        "icon": "$(check)"
       },
       {
         "command": "codeReview.applyCurrentAdjustment",
@@ -105,7 +137,7 @@
         "modelDescription": "Reviews source code changes in Git using AI. Use this tool to review any changes on the `target` ref (compared to `base`) to discover potential issues. Returns a list of review comments with file names, line numbers, and severity.",
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "review",
-        "icon": "images/icon.png",
+        "icon": "images/icon_compressed.png",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -130,7 +162,7 @@
         "modelDescription": "Reviews staged changes in Git using AI. Use this tool to review changes that have been staged with `git add` but not yet committed. Returns a list of review comments with file names, line numbers, and severity.",
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "reviewStaged",
-        "icon": "images/icon.png",
+        "icon": "images/icon_compressed.png",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -147,7 +179,7 @@
         "modelDescription": "Reviews unstaged changes in Git using AI. Use this tool to review changes in your working directory that haven't been staged yet. You can use this to check your work after completing a change requested by the user. Returns a list of review comments with file names, line numbers, and severity.",
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "reviewUnstaged",
-        "icon": "images/icon.png",
+        "icon": "images/icon_compressed.png",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -160,17 +192,22 @@
       }
     ],
     "views": {
-      "scm": [
+      "codeReviewSidebar": [
         {
           "id": "codeReview.codeReview",
           "name": "Copilot Code Review",
-          "when": "scmProvider == git",
           "type": "webview"
         }
       ]
     },
     "viewsContainers": {
-      "activitybar": []
+      "activitybar": [
+        {
+          "id": "codeReviewSidebar",
+          "title": "Code Review",
+          "icon": "images/icon.svg"
+        }
+      ]
     },
     "menus": {
       "view/title": [
@@ -178,6 +215,16 @@
           "command": "codeReview.refreshCodeReview",
           "when": "view == codeReview.codeReview",
           "group": "navigation"
+        },
+        {
+          "command": "codeReview.selectReviewMode",
+          "when": "view == codeReview.codeReview",
+          "group": "navigation@2"
+        },
+        {
+          "command": "codeReview.selectRepository",
+          "when": "view == codeReview.codeReview",
+          "group": "navigation@3"
         }
       ],
       "comments/commentThread/context": [
@@ -188,9 +235,9 @@
           "icon": "$(arrow-left)"
         },
         {
-          "command": "codeReview.nextComment", 
+          "command": "codeReview.nextComment",
           "when": "commentThread == codeReview-review",
-          "group": "navigation@2", 
+          "group": "navigation@2",
           "icon": "$(arrow-right)"
         },
         {
@@ -198,6 +245,12 @@
           "when": "commentThread == codeReview-review",
           "group": "navigation@3",
           "icon": "$(wand)"
+        },
+        {
+          "command": "codeReview.acceptCurrentComment",
+          "when": "commentThread == codeReview-review",
+          "group": "navigation@4",
+          "icon": "$(check)"
         }
       ],
       "comments/commentThread/title": [
@@ -208,7 +261,7 @@
           "icon": "$(arrow-left)"
         },
         {
-          "command": "codeReview.nextComment", 
+          "command": "codeReview.nextComment",
           "when": "commentThread == codeReview-review",
           "group": "navigation@2",
           "icon": "$(arrow-right)"
@@ -218,6 +271,12 @@
           "when": "commentThread == codeReview-review",
           "group": "navigation@3",
           "icon": "$(wand)"
+        },
+        {
+          "command": "codeReview.acceptCurrentComment",
+          "when": "commentThread == codeReview-review",
+          "group": "navigation@4",
+          "icon": "$(check)"
         }
       ]
     },
@@ -229,7 +288,7 @@
         "when": "commentController == codeReview-comments"
       },
       {
-        "command": "codeReview.previousComment", 
+        "command": "codeReview.previousComment",
         "key": "ctrl+shift+b",
         "mac": "cmd+shift+b",
         "when": "commentController == codeReview-comments"
@@ -263,6 +322,66 @@
             "type": "string"
           },
           "description": "Exclude paths from review using glob patterns. Binary files are not reviewed and do not need to be excluded."
+        },
+        "codeReview.repositoryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Repository path to review. Leave empty to use the workspace folder root. Relative paths are resolved from the workspace folder root."
+        },
+        "codeReview.reviewMode": {
+          "type": "string",
+          "default": "general",
+          "enum": [
+            "general",
+            "architectural",
+            "styleguide",
+            "performance"
+          ],
+          "markdownEnumDescriptions": [
+            "Default mode. General-purpose review for bugs, security issues, and quality risks.",
+            "High-level review mode. Focuses on architecture, module boundaries, coupling/cohesion, and maintainability.",
+            "Styleguide-focused mode. Prioritizes checks against `codeReview.styleguide` and optional repository instruction files.",
+            "Performance-focused mode. Prioritizes runtime, memory, and algorithmic efficiency issues."
+          ],
+          "description": "Controls how codeReview prioritizes feedback."
+        },
+        "codeReview.styleguide": {
+          "type": "string",
+          "default": "",
+          "description": "Styleguide text used in styleguide review mode.",
+          "editPresentation": "multilineText"
+        },
+        "codeReview.styleguideUseCopilotInstructions": {
+          "type": "boolean",
+          "default": true,
+          "description": "In styleguide mode, include style instructions from `.github/copilot-instructions.md` and `copilot-instructions.md` if present."
+        },
+        "codeReview.useGithubInstructions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include additional repository instructions from `.github/instructions/*.md` for all review modes. If instruction files define frontmatter `applyTo`, only matching files in the current review scope are considered."
+        },
+        "codeReview.architecturalContextLines": {
+          "type": "number",
+          "default": 30,
+          "minimum": 3,
+          "maximum": 200,
+          "description": "Number of context lines to include around changed lines in architectural review mode."
+        },
+        "codeReview.incrementalReReview": {
+          "type": "boolean",
+          "default": true,
+          "description": "When enabled, unchanged files compared to the last review baseline are skipped and previous findings are reused."
+        },
+        "codeReview.hideTriagedFindings": {
+          "type": "boolean",
+          "default": false,
+          "description": "Hide findings marked as Accepted or Not an issue in the sidebar results."
+        },
+        "codeReview.baselineFilePath": {
+          "type": "string",
+          "default": ".codereview-baseline.json",
+          "description": "Path to the baseline JSON used for incremental re-review and triage tracking. Relative paths are resolved from the repository root."
         },
         "codeReview.enableDebugOutput": {
           "type": "boolean",

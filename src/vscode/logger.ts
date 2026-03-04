@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 
 import { Logger } from '@/types/Logger';
 
-const outputChannelName = 'LGTM';
+const outputChannelName = 'codeReview';
 
 /** Logs to vscode output channel */
 export class LgtmLogger implements Logger {

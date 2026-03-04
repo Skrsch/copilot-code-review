@@ -24,6 +24,19 @@
     const reviewResults = document.getElementById('reviewResults');
     const reviewStatus = document.getElementById('reviewStatus');
     const reviewStatusText = document.getElementById('reviewStatusText');
+    const reviewSummary = document.getElementById('reviewSummary');
+    const reviewModeValue = document.getElementById('reviewModeValue');
+    const reviewModelValue = document.getElementById('reviewModelValue');
+    const repositoryPathValue = document.getElementById('repositoryPathValue');
+    const selectModelButton = document.getElementById('selectModelButton');
+    const selectModeButton = document.getElementById('selectModeButton');
+    const selectRepositoryButton = document.getElementById('selectRepositoryButton');
+    const incrementalToggle = document.getElementById('incrementalToggle');
+    const hideTriagedToggle = document.getElementById('hideTriagedToggle');
+    const quickReviewAnyButton = document.getElementById('quickReviewAnyButton');
+    const quickReviewBranchButton = document.getElementById('quickReviewBranchButton');
+    const quickReviewCommitButton = document.getElementById('quickReviewCommitButton');
+    const startQuickReviewButton = document.getElementById('startQuickReviewButton');
 
     let currentBranches = [];
     let selectedBaseBranch = '';
@@ -31,17 +44,82 @@
     let isReviewing = false;
     let isDropdownOpen = false;
     let currentResults = [];
+    let currentSummary = null;
     let isChatReviewMode = false; // Flag to indicate we're displaying chat review results
+    let hasPendingQuickReview = false;
+    let pendingQuickReviewDescription = '';
+    let areQuickActionsDisabled = false;
+    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let lastProgressRatio = 0;
+    let progressHideTimeout = null;
 
     // Initialize
     window.addEventListener('load', () => {
         setupEventListeners();
+        loadReviewSettings();
         loadBranches();
+        updateStartQuickReviewButton();
     });
 
     function setupEventListeners() {
         // Section collapse/expand functionality
         setupSectionCollapse();
+
+        selectModeButton?.addEventListener('click', () => {
+            if (!isReviewing) {
+                vscode.postMessage({ type: 'selectReviewMode' });
+            }
+        });
+
+        selectModelButton?.addEventListener('click', () => {
+            if (!isReviewing) {
+                vscode.postMessage({ type: 'selectChatModel' });
+            }
+        });
+
+        selectRepositoryButton?.addEventListener('click', () => {
+            if (!isReviewing) {
+                vscode.postMessage({ type: 'selectRepository' });
+            }
+        });
+
+        incrementalToggle?.addEventListener('change', () => {
+            vscode.postMessage({
+                type: 'setIncrementalReReview',
+                enabled: !!incrementalToggle.checked,
+            });
+        });
+
+        hideTriagedToggle?.addEventListener('change', () => {
+            vscode.postMessage({
+                type: 'setHideTriagedFindings',
+                enabled: !!hideTriagedToggle.checked,
+            });
+        });
+
+        quickReviewAnyButton?.addEventListener('click', () => {
+            if (!isReviewing) {
+                vscode.postMessage({ type: 'quickReview', reviewKind: 'review' });
+            }
+        });
+
+        quickReviewBranchButton?.addEventListener('click', () => {
+            if (!isReviewing) {
+                vscode.postMessage({ type: 'quickReview', reviewKind: 'branch' });
+            }
+        });
+
+        quickReviewCommitButton?.addEventListener('click', () => {
+            if (!isReviewing) {
+                vscode.postMessage({ type: 'quickReview', reviewKind: 'commit' });
+            }
+        });
+
+        startQuickReviewButton?.addEventListener('click', () => {
+            if (!isReviewing && hasPendingQuickReview) {
+                vscode.postMessage({ type: 'startQuickReview' });
+            }
+        });
         
         // Branch selection
         baseBranchButton?.addEventListener('click', () => {
@@ -217,6 +295,10 @@
         vscode.postMessage({ type: 'getBranches' });
     }
 
+    function loadReviewSettings() {
+        vscode.postMessage({ type: 'getReviewSettings' });
+    }
+
     function formatBranchDisplay(branchName) {
         if (!branchName) return branchName;
         
@@ -245,6 +327,9 @@
     function handleMessage(message) {
         console.log('WebView received message:', message.type, message);
         switch (message.type) {
+            case 'reviewSettingsLoaded':
+                updateReviewSettings(message);
+                break;
             case 'branchesLoaded':
                 populateBranches(message.branches, message.currentBranch, message.defaultBase);
                 break;
@@ -274,6 +359,15 @@
             case 'reviewStarted':
                 handleReviewStarted();
                 break;
+            case 'triggerBranchReview':
+                triggerBranchReview(message.reviewType);
+                break;
+            case 'quickReviewPrepared':
+                handleQuickReviewPrepared(message.description);
+                break;
+            case 'quickReviewCleared':
+                handleQuickReviewCleared();
+                break;
             case 'chatReviewDisplaying':
                 handleChatReviewDisplaying();
                 break;
@@ -284,7 +378,10 @@
                 handleFileReviewCompleted(message.fileResult);
                 break;
             case 'reviewCompleted':
-                handleReviewCompleted(message.results, message.errors);
+                handleReviewCompleted(message.results, message.errors, message.summary);
+                break;
+            case 'triageStatusUpdated':
+                handleTriageStatusUpdated(message.findingId, message.status);
                 break;
             case 'reviewError':
                 handleReviewError(message.message);
@@ -321,6 +418,133 @@
         updateReviewButtons();
     }
 
+    function updateReviewSettings(message) {
+        const reviewMode = message.reviewMode || 'general';
+        const reviewModeLabel = message.reviewModeLabel || reviewMode;
+        const chatModelLabel = message.chatModelLabel || message.chatModel || 'gpt-4o';
+        const repositoryPath = message.repositoryPath || '(workspace root)';
+        const incrementalReReview = !!message.incrementalReReview;
+        const hideTriagedFindings = !!message.hideTriagedFindings;
+
+        if (reviewModeValue) {
+            reviewModeValue.textContent = reviewModeLabel;
+            reviewModeValue.setAttribute('data-mode', reviewMode);
+        }
+        if (reviewModelValue) {
+            reviewModelValue.textContent = chatModelLabel;
+            reviewModelValue.title = chatModelLabel;
+        }
+        if (repositoryPathValue) {
+            repositoryPathValue.textContent = repositoryPath;
+            repositoryPathValue.title = repositoryPath;
+        }
+        if (incrementalToggle) {
+            incrementalToggle.checked = incrementalReReview;
+        }
+        if (hideTriagedToggle) {
+            hideTriagedToggle.checked = hideTriagedFindings;
+        }
+        applyTriagedVisibility();
+    }
+
+    function handleQuickReviewPrepared(description) {
+        hasPendingQuickReview = true;
+        pendingQuickReviewDescription = description || '';
+        updateStartQuickReviewButton();
+    }
+
+    function handleQuickReviewCleared() {
+        hasPendingQuickReview = false;
+        pendingQuickReviewDescription = '';
+        updateStartQuickReviewButton();
+    }
+
+    function updateStartQuickReviewButton() {
+        if (!startQuickReviewButton) {
+            return;
+        }
+
+        const disabled = areQuickActionsDisabled || !hasPendingQuickReview;
+        startQuickReviewButton.disabled = disabled;
+        startQuickReviewButton.classList.toggle('disabled', disabled);
+        startQuickReviewButton.title = hasPendingQuickReview
+            ? `Start review for ${pendingQuickReviewDescription || 'selected scope'}`
+            : 'Pick refs, branches, or a commit first';
+    }
+
+    function setProgress(ratio) {
+        if (!progressBar || !progressFill) {
+            return;
+        }
+
+        const bounded = Math.max(0, Math.min(1, ratio));
+        lastProgressRatio = bounded;
+        progressBar.classList.remove('hidden');
+        progressFill.style.width = `${Math.round(bounded * 100)}%`;
+    }
+
+    function updateProgressFromMessage(message) {
+        if (!message) {
+            return;
+        }
+
+        const match = message.match(/Processed\s+(\d+)\/(\d+)\s+files/i);
+        if (!match) {
+            return;
+        }
+
+        const processed = Number.parseInt(match[1], 10);
+        const total = Number.parseInt(match[2], 10);
+        if (!Number.isFinite(processed) || !Number.isFinite(total) || total <= 0) {
+            return;
+        }
+
+        // Keep small headroom until completion is confirmed.
+        const ratio = Math.min(0.96, processed / total);
+        setProgress(ratio);
+    }
+
+    function animateResultCards() {
+        if (!reviewResults) {
+            return;
+        }
+
+        const cards = reviewResults.querySelectorAll('.result-file');
+        let staggerIndex = 0;
+        cards.forEach(card => {
+            if (card.getAttribute('data-animated') === '1') {
+                return;
+            }
+            card.setAttribute('data-animated', '1');
+            card.style.setProperty('--cr-stagger', `${staggerIndex * 80}ms`);
+            staggerIndex += 1;
+
+            if (prefersReducedMotion) {
+                card.classList.add('is-visible');
+                return;
+            }
+
+            card.classList.add('result-file-enter');
+            requestAnimationFrame(() => {
+                card.classList.add('is-visible');
+            });
+        });
+    }
+
+    function pulseSummaryCard() {
+        if (!reviewSummary || reviewSummary.classList.contains('hidden')) {
+            return;
+        }
+        if (prefersReducedMotion) {
+            return;
+        }
+
+        reviewSummary.classList.remove('summary-pop');
+        // Force reflow so the animation can retrigger.
+        void reviewSummary.offsetWidth;
+        reviewSummary.classList.add('summary-pop');
+    }
+
     function updateReviewButtons() {
         // Don't update UI if we're in chat review mode
         if (isChatReviewMode) {
@@ -351,6 +575,30 @@
         });
     }
 
+    function triggerBranchReview(reviewType) {
+        if (isReviewing) {
+            return;
+        }
+
+        if (isChatReviewMode) {
+            isChatReviewMode = false;
+            const branchComparisonSection = document.getElementById('branchComparisonSection');
+            branchComparisonSection?.classList.remove('hidden');
+            expandSection('branchComparisonSection');
+        }
+
+        if (
+            !selectedBaseBranch ||
+            !selectedTargetBranch ||
+            selectedBaseBranch === selectedTargetBranch
+        ) {
+            showError('Select base and target branches in the sidebar before starting this review.');
+            return;
+        }
+
+        startReview(reviewType === 'all' ? 'all' : 'committed');
+    }
+
     function disableBranchSelectors() {
         if (baseBranchButton) {
             baseBranchButton.classList.add('disabled');
@@ -375,6 +623,32 @@
             targetBranchButton.style.opacity = '';
             targetBranchButton.style.cursor = '';
         }
+    }
+
+    function setQuickActionsDisabled(disabled) {
+        areQuickActionsDisabled = disabled;
+        [
+            selectModelButton,
+            selectModeButton,
+            selectRepositoryButton,
+            quickReviewAnyButton,
+            quickReviewBranchButton,
+            quickReviewCommitButton,
+        ].forEach(button => {
+            if (!button) {
+                return;
+            }
+            button.disabled = disabled;
+            button.classList.toggle('disabled', disabled);
+        });
+
+        if (incrementalToggle) {
+            incrementalToggle.disabled = disabled;
+        }
+        if (hideTriagedToggle) {
+            hideTriagedToggle.disabled = disabled;
+        }
+        updateStartQuickReviewButton();
     }
 
     function handleFilesListLoaded(files, baseBranch, targetBranch) {
@@ -481,6 +755,7 @@
         isReviewing = true;
         if (mainButton) mainButton.classList.add('disabled');
         disableBranchSelectors();
+        setQuickActionsDisabled(true);
         
         previewSection?.classList.add('hidden');
         statusSection?.classList.add('hidden');
@@ -495,12 +770,23 @@
         expandSection('resultsSection');
         
         if (reviewStatusText) reviewStatusText.textContent = 'Starting code review...';
+        if (progressHideTimeout) {
+            window.clearTimeout(progressHideTimeout);
+            progressHideTimeout = null;
+        }
+        progressBar?.classList.remove('hidden');
+        setProgress(0.08);
         
         // Clear previous results
         currentResults = [];
+        currentSummary = null;
         if (reviewResults) {
             reviewResults.innerHTML = '';
             console.log('Cleared previous results');
+        }
+        if (reviewSummary) {
+            reviewSummary.innerHTML = '';
+            reviewSummary.classList.add('hidden');
         }
     }
 
@@ -521,6 +807,12 @@
         
         // Hide the review status spinner since this is from chat
         reviewStatus?.classList.add('hidden');
+        progressBar?.classList.add('hidden');
+        lastProgressRatio = 0;
+        if (progressHideTimeout) {
+            window.clearTimeout(progressHideTimeout);
+            progressHideTimeout = null;
+        }
         
         // Ensure the results section is expanded when showing chat results
         expandSection('resultsSection');
@@ -530,6 +822,7 @@
 
     function handleReviewProgress(message) {
         if (reviewStatusText) reviewStatusText.textContent = message;
+        updateProgressFromMessage(message);
     }
 
     function handleFileReviewCompleted(fileResult) {
@@ -545,14 +838,20 @@
         
         // Append just this file result to UI
         updateResultsUI([fileResult], null, false, true); // append mode
+        setProgress(Math.max(lastProgressRatio, 0.12));
     }
 
-    function handleReviewCompleted(results, errors) {
-        console.log('handleReviewCompleted called with:', { resultsCount: results?.length, errorsCount: errors?.length });
+    function handleReviewCompleted(results, errors, summary) {
+        console.log('handleReviewCompleted called with:', {
+            resultsCount: results?.length,
+            errorsCount: errors?.length,
+            summary,
+        });
         
         isReviewing = false;
         if (mainButton) mainButton.classList.remove('disabled');
         enableBranchSelectors();
+        setQuickActionsDisabled(false);
         
         // Hide spinner
         reviewStatus?.classList.add('hidden');
@@ -574,23 +873,104 @@
             console.log('No results to display');
             currentResults = [];
         }
-        
+        currentSummary = summary || null;
+        renderReviewSummary(currentSummary);
+
         updateResultsUI(currentResults, errors, true);
+        setProgress(1);
+        if (progressHideTimeout) {
+            window.clearTimeout(progressHideTimeout);
+        }
+        progressHideTimeout = window.setTimeout(() => {
+            progressBar?.classList.add('hidden');
+            progressHideTimeout = null;
+        }, 320);
     }
 
     function handleReviewError(message) {
         isReviewing = false;
         if (mainButton) mainButton.classList.remove('disabled');
         enableBranchSelectors();
+        setQuickActionsDisabled(false);
+        currentSummary = null;
         
         reviewStatus?.classList.add('hidden');
+        progressBar?.classList.add('hidden');
+        lastProgressRatio = 0;
+        if (progressHideTimeout) {
+            window.clearTimeout(progressHideTimeout);
+            progressHideTimeout = null;
+        }
+        if (reviewSummary) {
+            reviewSummary.innerHTML = '';
+            reviewSummary.classList.add('hidden');
+        }
         
         if (reviewResults) {
             reviewResults.innerHTML = `<div class="error-message">Error: ${message}</div>`;
         }
     }
 
+    function renderReviewSummary(summary) {
+        if (!reviewSummary) {
+            return;
+        }
+
+        if (!summary) {
+            reviewSummary.innerHTML = '';
+            reviewSummary.classList.add('hidden');
+            return;
+        }
+
+        const severityOrder = [5, 4, 3, 2, 1];
+        const severityBadges = severityOrder
+            .map(level => {
+                const count = summary.severityCounts?.[level] || 0;
+                return `<span class="severity-chip severity-${level}">S${level}: ${count}</span>`;
+            })
+            .join('');
+        const modelUsed = escapeHtml(summary.modelUsed || 'unknown');
+        const resourcesUsed = renderContextList(summary.resourcesUsed);
+        const toolsUsed = renderContextList(summary.toolsUsed);
+
+        reviewSummary.innerHTML = `
+            <div class="summary-header">
+                <div class="summary-title">Review Summary</div>
+                <div class="summary-mode">${escapeHtml(summary.reviewMode || 'general')}</div>
+            </div>
+            <div class="summary-grid">
+                <div class="summary-item"><span>Findings</span><strong>${summary.findingsTotal || 0}</strong></div>
+                <div class="summary-item"><span>New</span><strong>${summary.findingsNew || 0}</strong></div>
+                <div class="summary-item"><span>Carried</span><strong>${summary.findingsCarried || 0}</strong></div>
+                <div class="summary-item"><span>Resolved</span><strong>${summary.findingsResolved || 0}</strong></div>
+                <div class="summary-item"><span>Files reviewed</span><strong>${summary.reviewedFiles || 0}/${summary.totalFiles || 0}</strong></div>
+                <div class="summary-item"><span>Skipped</span><strong>${summary.skippedUnchangedFiles || 0}</strong></div>
+            </div>
+            <div class="summary-meta">
+                <span class="summary-pill">${summary.incrementalEnabled ? 'Incremental ON' : 'Incremental OFF'}</span>
+                <span class="summary-pill">Open: ${summary.findingsOpen || 0}</span>
+                <span class="summary-pill">Triaged: ${summary.findingsTriaged || 0}</span>
+            </div>
+            <div class="severity-strip">${severityBadges}</div>
+            <div class="summary-context">
+                <div><strong>Model:</strong> <code>${modelUsed}</code></div>
+                <div><strong>Resources:</strong> ${resourcesUsed}</div>
+                <div><strong>Tools:</strong> ${toolsUsed}</div>
+            </div>
+        `;
+        reviewSummary.classList.remove('hidden');
+        pulseSummaryCard();
+    }
+
+    function renderContextList(values) {
+        if (!Array.isArray(values) || values.length === 0) {
+            return 'none';
+        }
+        return values.map(value => `<code>${escapeHtml(String(value))}</code>`).join(', ');
+    }
+
     function updateResultsUI(results, errors = null, isComplete = false, append = false) {
+        void errors;
         if (!results || results.length === 0) {
             if (isComplete && reviewResults) {
                 reviewResults.innerHTML = `
@@ -631,12 +1011,15 @@
                 if (comment.proposedAdjustment) {
                     console.log('Proposed adjustment:', comment.proposedAdjustment);
                 }
+                const findingId = comment.findingId || '';
+                const triageStatus = comment.triageStatus || 'open';
                 
                 html += `
-                    <div class="result-comment severity-${comment.severity}" data-file-path="${escapeHtml(file.target)}" data-line="${comment.line}" data-comment="${escapeHtml(comment.comment)}">
+                    <div class="result-comment severity-${comment.severity}" data-file-path="${escapeHtml(file.target)}" data-line="${comment.line}" data-comment="${escapeHtml(comment.comment)}" data-finding-id="${escapeHtml(findingId)}" data-triage-status="${escapeHtml(triageStatus)}">
                         <div class="comment-line">Line ${comment.line}</div>
                         <div class="comment-text">${parseMarkdown(comment.comment)}</div>
-                        ${comment.proposedAdjustment ? generateProposedAdjustmentHTML(comment.proposedAdjustment, file.target) : ''}
+                        ${generateTriageControls(comment, currentSummary?.scopeKey)}
+                        ${comment.proposedAdjustment ? generateProposedAdjustmentHTML(comment.proposedAdjustment) : ''}
                     </div>
                 `;
             });
@@ -672,6 +1055,8 @@
             } else {
                 attachResultEventListeners();
             }
+            animateResultCards();
+            applyTriagedVisibility();
         }
     }
 
@@ -681,6 +1066,10 @@
         // Add click event listeners for collapsible headers
         const fileHeaders = reviewResults.querySelectorAll('.result-file-header[data-file-index]');
         fileHeaders.forEach(header => {
+            if (header.getAttribute('data-click-listener') === '1') {
+                return;
+            }
+            header.setAttribute('data-click-listener', '1');
             header.addEventListener('click', () => {
                 const fileIndex = header.getAttribute('data-file-index');
                 const commentsSection = document.getElementById(`comments-${fileIndex}`);
@@ -692,9 +1081,11 @@
                     if (isExpanded) {
                         commentsSection.classList.remove('expanded');
                         chevron.classList.remove('expanded');
+                        header.classList.remove('expanded');
                     } else {
                         commentsSection.classList.add('expanded');
                         chevron.classList.add('expanded');
+                        header.classList.add('expanded');
                     }
                 }
             });
@@ -703,24 +1094,113 @@
         // Add click event listeners to comment elements
         const commentElements = reviewResults.querySelectorAll('.result-comment[data-file-path]');
         commentElements.forEach(element => {
+            if (element.getAttribute('data-click-listener') === '1') {
+                return;
+            }
+            element.setAttribute('data-click-listener', '1');
             element.addEventListener('click', () => {
-                const filePath = element.getAttribute('data-file-path');
-                const lineAttr = element.getAttribute('data-line');
-                const comment = element.getAttribute('data-comment');
-                
-                console.log('Comment clicked:', { filePath, lineAttr, comment });
-                
-                if (filePath && lineAttr && comment) {
-                    const line = parseInt(lineAttr, 10);
-                    console.log('Sending openFile message:', { filePath, line, comment });
+                if (element.classList.contains('triaged-hidden')) {
+                    return;
+                }
+                openResultComment(element);
+            });
+        });
+
+        const triageButtons = reviewResults.querySelectorAll('.triage-button[data-finding-id]');
+        triageButtons.forEach(button => {
+            if (button.getAttribute('data-click-listener') === '1') {
+                return;
+            }
+            button.setAttribute('data-click-listener', '1');
+            button.addEventListener('click', (event) => {
+                event.stopPropagation();
+                const findingId = button.getAttribute('data-finding-id');
+                const scopeKey = button.getAttribute('data-scope-key');
+                const status = button.getAttribute('data-triage-status');
+
+                const commentElement = button.closest('.result-comment[data-file-path]');
+                if (commentElement && !commentElement.classList.contains('triaged-hidden')) {
+                    openResultComment(commentElement);
+                }
+
+                if (findingId && scopeKey && status) {
                     vscode.postMessage({
-                        type: 'openFile',
-                        filePath: filePath,
-                        line: line,
-                        comment: comment
+                        type: 'setFindingTriageStatus',
+                        findingId,
+                        scopeKey,
+                        status,
                     });
                 }
             });
+        });
+    }
+
+    function openResultComment(element) {
+        const filePath = element.getAttribute('data-file-path');
+        const lineAttr = element.getAttribute('data-line');
+        const comment = element.getAttribute('data-comment');
+
+        if (!filePath || !lineAttr || !comment) {
+            return;
+        }
+
+        const line = parseInt(lineAttr, 10);
+        if (Number.isNaN(line)) {
+            return;
+        }
+
+        element.classList.remove('is-opening');
+        if (!prefersReducedMotion) {
+            void element.offsetWidth;
+            element.classList.add('is-opening');
+            window.setTimeout(() => {
+                element.classList.remove('is-opening');
+            }, 420);
+        }
+
+        vscode.postMessage({
+            type: 'openFile',
+            filePath: filePath,
+            line: line,
+            comment: comment
+        });
+    }
+
+    function handleTriageStatusUpdated(findingId, status) {
+        if (!reviewResults || !findingId || !status) {
+            return;
+        }
+
+        const commentElements = reviewResults.querySelectorAll(`.result-comment[data-finding-id="${escapeSelector(findingId)}"]`);
+        commentElements.forEach((element) => {
+            element.setAttribute('data-triage-status', status);
+            const buttons = element.querySelectorAll('.triage-button[data-triage-status]');
+            buttons.forEach(button => {
+                const buttonStatus = button.getAttribute('data-triage-status');
+                button.classList.toggle('active', buttonStatus === status);
+                if (buttonStatus === status) {
+                    button.classList.remove('just-activated');
+                    if (!prefersReducedMotion) {
+                        void button.offsetWidth;
+                        button.classList.add('just-activated');
+                    }
+                }
+            });
+        });
+        applyTriagedVisibility();
+    }
+
+    function applyTriagedVisibility() {
+        if (!reviewResults) {
+            return;
+        }
+
+        const hideTriaged = !!hideTriagedToggle?.checked;
+        const commentElements = reviewResults.querySelectorAll('.result-comment[data-triage-status]');
+        commentElements.forEach(element => {
+            const status = element.getAttribute('data-triage-status') || 'open';
+            const shouldHide = hideTriaged && status !== 'open';
+            element.classList.toggle('triaged-hidden', shouldHide);
         });
     }
 
@@ -740,9 +1220,7 @@
         return div.innerHTML;
     }
 
-    function generateProposedAdjustmentHTML(proposedAdjustment, filePath) {
-        const adjustmentId = `adjustment-${Math.random().toString(36).substr(2, 9)}`;
-        
+    function generateProposedAdjustmentHTML(proposedAdjustment) {
         return `
             <div class="proposed-adjustment">
                 <div class="proposed-adjustment-header">
@@ -767,6 +1245,35 @@
                 </div>
             </div>
         `;
+    }
+
+    function generateTriageControls(comment, scopeKey) {
+        if (!comment?.findingId) {
+            return '';
+        }
+
+        const current = comment.triageStatus || 'open';
+        const scope = scopeKey || '';
+        const unavailableTitle = scope
+            ? ''
+            : 'title="Triage status update unavailable for this result set."';
+        const findingId = escapeHtml(comment.findingId);
+        const scopeValue = escapeHtml(scope);
+
+        return `
+            <div class="triage-controls" data-finding-id="${findingId}">
+                <button class="triage-button ${current === 'open' ? 'active' : ''}" data-finding-id="${findingId}" data-scope-key="${scopeValue}" data-triage-status="open" ${unavailableTitle}>Open</button>
+                <button class="triage-button ${current === 'accepted' ? 'active' : ''}" data-finding-id="${findingId}" data-scope-key="${scopeValue}" data-triage-status="accepted" ${unavailableTitle}>Accepted</button>
+                <button class="triage-button ${current === 'false_positive' ? 'active' : ''}" data-finding-id="${findingId}" data-scope-key="${scopeValue}" data-triage-status="false_positive" ${unavailableTitle}>Not an issue</button>
+            </div>
+        `;
+    }
+
+    function escapeSelector(text) {
+        if (!text) {
+            return '';
+        }
+        return text.replace(/["\\]/g, '\\$&');
     }
 
     // Simple markdown parser for comment text

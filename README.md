@@ -1,73 +1,121 @@
-![Demo](https://raw.githubusercontent.com/jakubkozera/vsc-copilot-code-review/refs/heads/master/githubcopilot-code-reviewer.gif)
+<p align="center">
+  <img src="images/icon_compressed.png" width="104" alt="Github Copilot Code Reviewer icon" />
+</p>
 
-# Github Copilot Code Reviewer
+<h1 align="center">Github Copilot Code Reviewer</h1>
 
-[![Latest Release](https://flat.badgen.net/github/release/jakubkozera/vsc-copilot-code-review)](https://github.com/jakubkozera/vsc-copilot-code-review/releases)
-![Installs](https://vsmarketplacebadges.dev/installs-short/jakubkozera.vsc-copilot-code-review.svg)
-[![Status](https://flat.badgen.net/github/checks/jakubkozera/vsc-copilot-code-review)](https://github.com/jakubkozera/vsc-copilot-code-review/actions/workflows/node.js.yml)
-[![License](https://flat.badgen.net/github/license/jakubkozera/vsc-copilot-code-review)](./LICENSE)
+<p align="center">
+  A modern review cockpit inside VS Code: faster feedback, cleaner navigation, and smarter context-aware analysis for real-world repositories.
+</p>
 
-Github Copilot Code Reviewer is a Visual Studio Code extension that uses GitHub Copilot Chat to review source code changes in Git. It can help you catch bugs, areas for improvement, and other issues before merging.
+## Why Use It
 
-> **Note**: This project is a fork of [cpulvermacher/lgtm](https://github.com/cpulvermacher/lgtm) with enhanced Source Control integration and additional features.
+- Review directly inside a dedicated **Code Review** activity bar workspace.
+- Switch between **General**, **Architectural**, **Styleguide**, and **Performance** review modes.
+- Select the exact repository to review, including repositories in workspace subfolders.
+- Run incremental re-reviews with persistent finding history and triage.
+- Apply suggested fixes from findings and move quickly through comments with keyboard navigation.
 
+## What Makes It Different
 
-## Getting Started
+- **Purpose-built sidebar UI**: model, mode, repository, and review controls in one place.
+- **No accidental quick-review runs**: pick refs first, then explicitly press **Start Review**.
+- **Context-aware reviews**: supports `.github/instructions/*.md` and optional Copilot instruction files.
+- **Finding lifecycle support**: triage as Open, Accepted, or Not an issue, and optionally hide triaged items.
+- **Traceable review context**: summary includes model used plus resources/tools considered.
 
+## Requirements
 
-**Open the Chat Sidebar**
+- VS Code `1.99+`
+- Git repository in your workspace
+- GitHub Copilot Chat extension (`github.copilot-chat`)
 
-Switch to the Chat sidebar and ensure you are in `Ask` mode.
+## Quick Start
 
-**Start a Review**
-- Type `/review` to review uncommitted changes or changes between two branches, commits, or tags.
-- You can specify git refs explicitly, e.g. `/review develop main`, or omit arguments to select refs interactively.
-- Use `/branch` to review changes between two branches.
-- Use `/commit` to review a single commit.
+1. Open the **Code Review** icon in the Activity Bar.
+2. In **Review Setup**, choose:
+   - review mode
+   - chat model
+   - repository
+3. Start a review using one of these flows:
+   - **Quick picks**: `Pick refs` / `Pick branches` / `Pick commit`, then click **Start Review**
+   - **Branch comparison**: select base + target branch, then click **Review**
+4. Open findings from the results list to jump straight to code.
 
-**View Results**
+## Review Modes
 
-codeReview will respond with review comments grouped by file and sorted by severity. The enhanced Source Control integration automatically displays review results in a dedicated **"Copilot Code Review"** tab within the Source Control panel, providing a structured view alongside your Git changes for seamless workflow integration.
+- `general`: broad bug/risk/quality review
+- `architectural`: higher-level structure and design review
+- `styleguide`: checks against style guidance and instruction files
+- `performance`: runtime/memory/efficiency focused review
 
-**Navigate Review Comments**
+## Instructions and Styleguide Context
 
-- Results appear both in the chat and in the dedicated "Copilot Code Review" tab in Source Control
-- The Source Control tab organizes comments by file with direct navigation to code locations
-- Click on any comment to jump directly to the relevant line in your code
-- Navigate between comments using the arrow buttons in comment threads
-- Use keyboard shortcuts: `Ctrl+Shift+N` (next) and `Ctrl+Shift+B` (previous) when a comment thread is active
-- Manage review comments alongside your Git workflow in a unified interface
+- Optional repository-wide instructions: `.github/instructions/*.md`
+- Optional Copilot instruction files in styleguide mode:
+  - `.github/copilot-instructions.md`
+  - `copilot-instructions.md`
+- Custom styleguide text via `codeReview.styleguide`
 
+## Findings Workflow
 
-## Features
+- Sidebar finding triage: **Open**, **Accepted**, **Not an issue**
+- Inline comment actions: **Apply Fix**, **Skip**, **Accept**, **Discard**
+- Incremental baseline and triage persistence via `codeReview.baselineFilePath`
 
-- **Enhanced Source Control Integration**: Review results appear in a dedicated "Copilot Code Review" tab within the Source Control view, seamlessly integrating with your Git workflow for efficient code review management.
-- **Dual Display Mode**: Comments are shown both in Chat and in the structured Source Control tab for maximum flexibility.
-- **Only Copilot Required**: Uses Copilot Chat for reviewing changes.
-- **Model Selection**: Choose any language model available to VS Code via the **codeReview: Select Chat Model** command available in the Command Palette (press `Cmd+Shift+P` or `Ctrl+Shift+P`).
-- **Custom Instructions**: Add custom instructions via the `codeReview: Custom Prompt` setting (e.g., change the language of review comments by adding `- In the final JSON output, use Spanish for the comment field.`).
-- **Interactive Navigation**: Navigate between review comments using keyboard shortcuts and inline buttons directly from the Source Control tab.
-- **Agent Support**: Adds tools to enable automatic reviews in agent mode:
-  - `#review`: Reviews changes between two git references (branches, tags, or commits)
-  - `#reviewStaged`: Reviews only staged changes in your working directory
-  - `#reviewUnstaged`: Reviews only unstaged changes in your working directory
-  - Example usage: `After your changes, run all tests and run #reviewUnstaged to check your work.`
-- **Chat Integration**: Review content remains in chat history for follow-up questions by omitting `@codeReview`.
+## Chat and Agent Workflows
 
+### Chat participant commands
 
+- `/review` compare refs (branches/tags/commits)
+- `/branch` compare branches
+- `/commit` review one commit
 
-## Limitations
+### Agent tools
 
-- This project is a work in progress; comment quality may vary.
-- Large change sets may trigger chat model rate limits. Please wait before retrying.
-- Some non-Copilot models require setting a system prompt which is not possible just yet.
+- `#review`
+- `#reviewStaged`
+- `#reviewUnstaged`
 
+## Useful Settings
+
+```json
+{
+  "codeReview.repositoryPath": "",
+  "codeReview.reviewMode": "general",
+  "codeReview.chatModel": "gpt-4o",
+  "codeReview.incrementalReReview": true,
+  "codeReview.hideTriagedFindings": false,
+  "codeReview.styleguide": "",
+  "codeReview.styleguideUseCopilotInstructions": true,
+  "codeReview.useGithubInstructions": true,
+  "codeReview.baselineFilePath": ".codereview-baseline.json"
+}
+```
+
+## Keyboard Shortcuts
+
+- Next comment: `Ctrl+Shift+N` (`Cmd+Shift+N` on macOS)
+- Previous comment: `Ctrl+Shift+B` (`Cmd+Shift+B` on macOS)
+
+## Install from VSIX
+
+```bash
+code --install-extension github-copilot-code-reviewer-0.22.2.vsix
+```
+
+## Build Locally
+
+```bash
+pnpm install
+pnpm test
+pnpm build
+```
 
 ## Data Usage
 
-Source code changes and commit messages selected for review are sent to the chat model configured in the extension settings (default: GitHub Copilot GPT-4o).
+Files, diffs, and relevant review context are sent to the configured chat model to generate findings.
 
+## License
 
-## Contributing
-
-Contributions are welcome! If you have ideas, bug reports, or want to help improve codeReview, please open an issue or submit a pull request on [GitHub](https://github.com/jakubkozera/vsc-copilot-code-review).
+See [LICENSE](./LICENSE).

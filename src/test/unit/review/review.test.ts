@@ -26,11 +26,16 @@ function createMockConfig() {
 
     const config = {
         git,
+        gitRoot: '/tmp',
         getOptions: vi.fn(() => ({
             customPrompt: 'custom prompt',
             minSeverity: 3,
             excludeGlobs: [] as string[],
+            useGithubInstructions: false,
             enableDebugOutput: false,
+            incrementalReReview: false,
+            hideTriagedFindings: false,
+            baselineFilePath: '/tmp/code-review-baseline-unit-tests.json',
             mergeFileReviewRequests: true,
         })),
         logger,
@@ -172,6 +177,34 @@ describe('reviewDiff', () => {
         expect(parseResponse).toHaveBeenCalledWith('model response');
     });
 
+    it('uses architectural context lines for architectural review mode', async () => {
+        vi.mocked(config.getOptions).mockReturnValue({
+            customPrompt: 'custom prompt',
+            minSeverity: 3,
+            excludeGlobs: [] as string[],
+            useGithubInstructions: false,
+            enableDebugOutput: false,
+            incrementalReReview: false,
+            hideTriagedFindings: false,
+            baselineFilePath: '/tmp/code-review-baseline-unit-tests.json',
+            chatModel: 'gpt-4o',
+            mergeFileReviewRequests: true,
+            maxInputTokensFraction: 0.95,
+            reviewMode: 'architectural',
+            architecturalContextLines: 42,
+        });
+
+        vi.mocked(modelRequest.sendRequest).mockResolvedValueOnce(
+            reviewResponse
+        );
+        vi.mocked(parseResponse).mockReturnValue(mockComments);
+
+        await reviewDiff(config, { scope }, progress, cancellationToken);
+
+        expect(git.getFileDiff).toHaveBeenCalledWith(scope, diffFiles[0], 42);
+        expect(git.getFileDiff).toHaveBeenCalledWith(scope, diffFiles[1], 42);
+    });
+
     it('merges file review requests if enabled', async () => {
         vi.mocked(modelRequest.sendRequest).mockResolvedValue(reviewResponse);
         vi.mocked(parseResponse).mockReturnValue(mockComments);
@@ -198,7 +231,11 @@ describe('reviewDiff', () => {
             customPrompt: 'custom prompt',
             minSeverity: 3,
             excludeGlobs: [] as string[],
+            useGithubInstructions: false,
             enableDebugOutput: false,
+            incrementalReReview: false,
+            hideTriagedFindings: false,
+            baselineFilePath: '/tmp/code-review-baseline-unit-tests.json',
             chatModel: 'gpt-4o',
             mergeFileReviewRequests: false,
             maxInputTokensFraction: 0.95,

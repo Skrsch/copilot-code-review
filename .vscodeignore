@@ -3,8 +3,8 @@
 # whitelist included files
 !LICENSE
 !CHANGELOG.md
-!images/icon.png
-!images/chat_icon.png
+!images/icon_compressed.png
+!images/icon.svg
 !media/main.css
 !media/main.js
 !media/reset.css
